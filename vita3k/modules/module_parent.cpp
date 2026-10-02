@@ -43,6 +43,7 @@
 
 #include <cstdlib>
 #include <string>
+#include <mutex>
 #include <unordered_map>
 #include <vector>
 
@@ -237,7 +238,66 @@ static void pso2_trace_call(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, Sc
     LOG_INFO("[PSO2T] TID {} {} ({:#x}, {:#x}, {:#x}, {:#x}) = {:#x} lr {:#x}{}{}", thread_id, name, a0, a1, a2, a3, ret, lr, pre, post);
 }
 
+// pso2_vita_offline: PSO2_TRACE_PEEK="<addr>[*]+<off>:<len>,..." watches guest memory (after "*", addr is a pointer
+// that is dereferenced first) and logs the bytes whenever they change. Checked on every HLE import call, so the
+// resolution is roughly one frame.
+struct Pso2Peek {
+    Address addr;
+    bool deref;
+    uint32_t off, len;
+    std::string last;
+};
+
+static void pso2_trace_peek(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id) {
+    static std::vector<Pso2Peek> peeks = [] {
+        std::vector<Pso2Peek> out;
+        const char *env = std::getenv("PSO2_TRACE_PEEK");
+        if (!env)
+            return out;
+        std::string s = env;
+        size_t pos = 0;
+        while (pos < s.size()) {
+            const size_t end = std::min(s.find(',', pos), s.size());
+            const std::string item = s.substr(pos, end - pos);
+            pos = end + 1;
+            Pso2Peek p{};
+            char *rest = nullptr;
+            p.addr = static_cast<Address>(std::strtoul(item.c_str(), &rest, 0));
+            if (*rest == '*') {
+                p.deref = true;
+                rest++;
+            }
+            if (*rest == '+')
+                p.off = static_cast<uint32_t>(std::strtoul(rest + 1, &rest, 0));
+            p.len = *rest == ':' ? static_cast<uint32_t>(std::strtoul(rest + 1, nullptr, 0)) : 4;
+            out.push_back(p);
+        }
+        return out;
+    }();
+    if (peeks.empty())
+        return;
+    static std::mutex mutex;
+    const std::lock_guard<std::mutex> lock(mutex);
+    for (size_t i = 0; i < peeks.size(); i++) {
+        auto &p = peeks[i];
+        Address base = p.addr;
+        if (p.deref) {
+            if (!is_valid_addr_range(emuenv.mem, base, base + 4))
+                continue;
+            base = *Ptr<const uint32_t>(base).get(emuenv.mem);
+            if (base == 0)
+                continue;
+        }
+        const std::string now = pso2_hex(emuenv.mem, base + p.off, p.len);
+        if (now != p.last) {
+            LOG_INFO("[PSO2T] PEEK {} {:#x} = {} (TID {} before {} lr {:#x})", i, base + p.off, now, thread_id, import_name(nid), read_lr(cpu));
+            p.last = now;
+        }
+    }
+}
+
 void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id) {
+    pso2_trace_peek(emuenv, cpu, nid, thread_id);
     // HLE - call our C++ function
     if (pso2_trace_wanted(nid)) {
         if (const ImportFn *fn = resolve_import(nid)) {

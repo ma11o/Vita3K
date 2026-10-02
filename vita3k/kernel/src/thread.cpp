@@ -24,10 +24,74 @@
 
 #include <util/log.h>
 
+#include <algorithm>
+#include <array>
 #include <cassert>
+#include <cstdlib>
+#include <map>
+#include <mutex>
+#include <vector>
 #include <cstring>
 #include <memory>
 #include <sstream>
+
+// pso2_vita_offline: PSO2_TRACE_CODE="<addr>,..." puts Thumb breakpoints at guest code addresses. When a thread hits
+// one, r0-r3, r4-r7, fp, sp and lr are logged (only when they differ from the last hit at that address, unless
+// PSO2_TRACE_CODE_ALL is set), the original instruction is stepped over and the breakpoint is put back.
+static std::vector<Address> pso2_code_addrs() {
+    std::vector<Address> out;
+    const char *env = std::getenv("PSO2_TRACE_CODE");
+    if (!env)
+        return out;
+    const char *p = env;
+    while (*p) {
+        char *end = nullptr;
+        const Address a = static_cast<Address>(std::strtoul(p, &end, 0));
+        if (end == p)
+            break;
+        out.push_back(a & ~1u);
+        p = *end == ',' ? end + 1 : end;
+    }
+    return out;
+}
+
+static void pso2_code_install(KernelState &kernel, MemState &mem) {
+    static std::once_flag once;
+    std::call_once(once, [&] {
+        for (const Address a : pso2_code_addrs()) {
+            kernel.debugger.add_breakpoint(mem, a, true);
+            LOG_INFO("[PSO2T] CODE breakpoint at {:#x}", a);
+        }
+    });
+}
+
+static bool pso2_code_hit(KernelState &kernel, MemState &mem, CPUState &cpu, SceUID thread_id) {
+    static const std::vector<Address> addrs = pso2_code_addrs();
+    static const bool log_all = std::getenv("PSO2_TRACE_CODE_ALL") != nullptr;
+    static std::mutex mutex;
+    static std::map<Address, std::array<uint32_t, 11>> last;
+    const Address pc = read_pc(cpu) & ~1u;
+    if (std::find(addrs.begin(), addrs.end(), pc) == addrs.end())
+        return false;
+    std::array<uint32_t, 11> regs{};
+    for (int i = 0; i < 8; i++)
+        regs[i] = read_reg(cpu, i);
+    regs[8] = read_reg(cpu, 11);
+    regs[9] = read_sp(cpu);
+    regs[10] = read_lr(cpu);
+    {
+        const std::lock_guard<std::mutex> lock(mutex);
+        auto &prev = last[pc];
+        if (log_all || prev != regs)
+            LOG_INFO("[PSO2T] CODE {:#x} TID {} r0 {:#x} r1 {:#x} r2 {:#x} r3 {:#x} r4 {:#x} r5 {:#x} r6 {:#x} r7 {:#x} fp {:#x} sp {:#x} lr {:#x}",
+                pc, thread_id, regs[0], regs[1], regs[2], regs[3], regs[4], regs[5], regs[6], regs[7], regs[8], regs[9], regs[10]);
+        prev = regs;
+    }
+    kernel.debugger.remove_breakpoint(mem, pc);
+    step(cpu);
+    kernel.debugger.add_breakpoint(mem, pc, true);
+    return true;
+}
 
 void ThreadSignal::wait() {
     std::unique_lock<std::mutex> lock(mutex);
@@ -268,8 +332,11 @@ void ThreadState::run_loop() {
 
             lock.unlock();
 
+            pso2_code_install(kernel, mem);
+
             // Single step or run
             const int res = do_step ? step(*cpu) : run(*cpu);
+            const bool pso2_handled = !do_step && hit_breakpoint(*cpu) && pso2_code_hit(kernel, mem, *cpu, id);
 
             // handle svc call if this was what stopped the cpu
             if (cpu->svc_called) {
@@ -284,7 +351,7 @@ void ThreadState::run_loop() {
 
             lock.lock();
 
-            if (do_step || suspend_requested || hit_breakpoint(*cpu)) {
+            if (do_step || suspend_requested || (hit_breakpoint(*cpu) && !pso2_handled)) {
                 suspend_requested = false;
                 update_status(ThreadStatus::suspend);
             }
