@@ -83,8 +83,15 @@ static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     // Don't track dirty for small surfaces to avoid false positives from unrelated writes
     std::shared_ptr<bool> dirty = small_surface ? nullptr : info.dirty;
 
+    const Address t6_surface = info.data.address();
     add_protect(mem, addr_start, addr_end - addr_start, perm,
-        [dirty, need_sync](Address, bool write) {
+        [dirty, need_sync, t6_surface](Address fault, bool write) {
+            {
+                // T6 (pso2): log the guest touching the backing memory of a GPU-rendered surface (the first 100 times)
+                static uint32_t t6_count = 0;
+                if (t6_count++ < 100)
+                    LOG_INFO("[T6] guest {} of surface 0x{:08X} at 0x{:08X}", write ? "write" : "read", t6_surface, fault);
+            }
             if (write && dirty)
                 *dirty = true;
             if (need_sync)
@@ -1517,6 +1524,44 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
     memcpy(frame.data(), temp_buff.mapped_data, frame.size() * 4);
 
     return frame;
+}
+
+bool VKSurfaceCache::t6_readback(MemState &mem, Address address) {
+    // T6 (pso2) experiment: copy a rendered color surface back to guest memory without memory mapping (macOS).
+    // Synchronous and slow (waits for the GPU); only for checking what the game reads back.
+    auto it = color_address_lookup.find(address);
+    if (it == color_address_lookup.end())
+        return false;
+    ColorSurfaceCacheInfo &info = *it->second;
+    if (info.tiling != SurfaceTiling::Linear || state.res_multiplier != 1.0f || format_need_additional_memory(info.format))
+        return false;
+
+    const uint32_t size = info.stride_bytes * info.original_height;
+    vkutil::Buffer buffer;
+    buffer.size = size;
+    buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
+
+    state.device.waitIdle();
+    vk::CommandBuffer cmd = vkutil::create_single_time_command(state.device, state.general_command_pool);
+    const uint32_t pixel_stride = (info.stride_bytes * 8) / gxm::bits_per_pixel(info.format);
+    vk::BufferImageCopy copy{
+        .bufferOffset = 0,
+        .bufferRowLength = pixel_stride,
+        .bufferImageHeight = info.original_height,
+        .imageSubresource = vkutil::color_subresource_layer,
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { info.original_width, info.original_height, 1 }
+    };
+    cmd.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, buffer.buffer, copy);
+    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd);
+
+    // the backing memory is protected: the first write faults, runs the protect callback and unprotects it
+    std::memcpy(Ptr<uint8_t>(address).get(mem), buffer.mapped_data, size);
+
+    static uint32_t t6_count = 0;
+    if (t6_count++ < 50)
+        LOG_INFO("[T6] readback surface 0x{:08X} {}x{} ({} bytes)", address, info.original_width, info.original_height, size);
+    return true;
 }
 
 } // namespace renderer::vulkan

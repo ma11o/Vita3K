@@ -26,6 +26,10 @@
 #include <renderer/gl/types.h>
 
 #include <renderer/vulkan/functions.h>
+#include <renderer/vulkan/state.h>
+
+#include <cstdlib>
+#include <string_view>
 
 #include <config/state.h>
 #include <util/log.h>
@@ -144,6 +148,16 @@ COMMAND(handle_sync_surface_data) {
     // additional check to make sure we never try to perform surface sync on OpenGL with a non-integer resolution multiplier
     if (renderer.current_backend == Backend::OpenGL && static_cast<int>(renderer.res_multiplier * 4.0f) % 4 != 0)
         renderer.disable_surface_sync = true;
+
+    if (renderer.current_backend == Backend::Vulkan) {
+        // T6 (pso2) experiment: PSO2_T6_READBACK=all|<hex address> copies the surface back to guest memory before signalling
+        static const char *t6_readback = std::getenv("PSO2_T6_READBACK");
+        if (t6_readback && surface->data.address() != 0) {
+            const bool all = std::string_view(t6_readback) == "all";
+            if (all || std::strtoul(t6_readback, nullptr, 16) == surface->data.address())
+                dynamic_cast<vulkan::VKState &>(renderer).surface_cache.t6_readback(mem, surface->data.address());
+        }
+    }
 
     if (renderer.disable_surface_sync || renderer.current_backend == Backend::Vulkan) {
         if (helper.cmd->status) {

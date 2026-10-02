@@ -190,6 +190,9 @@ private:
     void destroy_surface(DepthStencilSurfaceCacheInfo &info);
 
 public:
+    // T6 (pso2) experiment: synchronous readback of a color surface into guest memory
+    bool t6_readback(MemState &mem, Address address);
+
     // when creating a mutable image, can we pass as an argument
     // the possible format used for an image view to improve performance ?
     bool support_image_format_specifier = false;
