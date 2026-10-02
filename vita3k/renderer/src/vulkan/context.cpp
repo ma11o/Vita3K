@@ -18,6 +18,10 @@
 #include <renderer/vulkan/types.h>
 
 #include <renderer/vulkan/functions.h>
+
+#include <cstdlib>
+#include <set>
+#include <tuple>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
 
@@ -130,6 +134,14 @@ void set_context(VKContext &context, MemState &mem, VKRenderTarget *rt, const Fe
     context.state.texture_cache.current_scene_timestamp = context.scene_timestamp;
 
     SceGxmColorSurface *color_surface_fin = &context.record.color_surface;
+    {
+        // T6 (pso2): log every color surface the game renders to, once per (address, size, format)
+        static std::set<std::tuple<const void *, uint32_t, uint32_t, uint32_t, uint32_t>> t6_seen;
+        const auto key = std::make_tuple(static_cast<const void *>(&context), color_surface_fin->data.address(), color_surface_fin->width, color_surface_fin->height, static_cast<uint32_t>(color_surface_fin->colorFormat));
+        if (t6_seen.insert(key).second)
+            LOG_INFO("[T6] ctx {} color surface 0x{:08X} {}x{} stride {} fmt 0x{:08X} downscale {}", static_cast<const void *>(&context), color_surface_fin->data.address(), color_surface_fin->width, color_surface_fin->height,
+                color_surface_fin->strideInPixels, static_cast<uint32_t>(color_surface_fin->colorFormat), static_cast<int>(color_surface_fin->downscale));
+    }
     // set these values for the pipeline cache
     context.record.color_base_format = gxm::get_base_format(color_surface_fin->colorFormat);
     context.record.is_gamma_corrected = static_cast<bool>(color_surface_fin->gamma);

@@ -1263,6 +1263,7 @@ static int destroy_gxm_context(EmuEnvState &emuenv, SceGxmContext *context, cons
 
         destroy_pending_immediate_commands(context);
 
+        LOG_INFO("[T6] destroy immediate context 0x{:08X} renderer {}", context_addr, static_cast<const void *>(context->renderer.get()));
         if (force_backend_destroy) {
             renderer::destroy_context_during_shutdown(*emuenv.renderer, context->renderer);
         } else {
@@ -2020,6 +2021,7 @@ EXPORT(int, sceGxmCreateContext, const SceGxmContextParams *params, Ptr<SceGxmCo
     };
 
     emuenv.gxm.immediate_contexts.emplace(ctx, context->address());
+    LOG_INFO("[T6] sceGxmCreateContext 0x{:08X} renderer {} thread {} (immediate contexts: {})", context->address(), static_cast<const void *>(ctx->renderer.get()), thread_id, emuenv.gxm.immediate_contexts.size());
     if (emuenv.gxm.last_immediate_context == 0)
         emuenv.gxm.last_immediate_context = context->address();
     return 0;
