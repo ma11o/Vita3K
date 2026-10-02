@@ -38,6 +38,13 @@
 #include <util/string_utils.h>
 
 #include <unordered_set>
+#include <mem/functions.h>
+#include <mem/ptr.h>
+
+#include <cstdlib>
+#include <string>
+#include <unordered_map>
+#include <vector>
 
 static constexpr bool LOG_UNK_NIDS_ALWAYS = false;
 
@@ -149,8 +156,95 @@ static void log_import_call(char emulation_level, uint32_t nid, SceUID thread_id
     }
 }
 
+// pso2_vita_offline: trace HLE import calls whose names start with one of the comma-separated
+// prefixes in PSO2_TRACE_IMPORTS (e.g. "sceNet,sceNp,-sceNpCheckCallback"). Logs r0-r3, the return value and lr;
+// for sceNetSend/Recv(from)/Sendto the payload (up to PSO2_TRACE_BYTES, default 512), for sceNetConnect/Bind the sockaddr.
+static const std::vector<std::string> &pso2_trace_prefixes() {
+    static const std::vector<std::string> prefixes = [] {
+        std::vector<std::string> out;
+        const char *env = std::getenv("PSO2_TRACE_IMPORTS");
+        if (!env)
+            return out;
+        std::string s = env;
+        size_t pos = 0;
+        while (pos <= s.size()) {
+            const size_t end = std::min(s.find(',', pos), s.size());
+            if (end > pos)
+                out.emplace_back(s.substr(pos, end - pos));
+            pos = end + 1;
+        }
+        return out;
+    }();
+    return prefixes;
+}
+
+static bool pso2_trace_wanted(uint32_t nid) {
+    const auto &prefixes = pso2_trace_prefixes();
+    if (prefixes.empty())
+        return false;
+    thread_local std::unordered_map<uint32_t, bool> cache;
+    const auto it = cache.find(nid);
+    if (it != cache.end())
+        return it->second;
+    const std::string name = import_name(nid);
+    // "-name" entries exclude exact names (e.g. per-frame polls like -sceNpCheckCallback)
+    bool wanted = false;
+    for (const auto &p : prefixes)
+        if (p[0] != '-')
+            wanted |= name.starts_with(p);
+    for (const auto &p : prefixes)
+        if (p[0] == '-' && name == p.substr(1))
+            wanted = false;
+    cache.emplace(nid, wanted);
+    return wanted;
+}
+
+static std::string pso2_hex(const MemState &mem, Address addr, uint32_t len) {
+    if (len == 0 || !is_valid_addr_range(mem, addr, addr + len))
+        return "-";
+    static const uint32_t max_bytes = [] {
+        const char *env = std::getenv("PSO2_TRACE_BYTES");
+        return env ? static_cast<uint32_t>(std::strtoul(env, nullptr, 0)) : 512u;
+    }();
+    const uint8_t *p = Ptr<const uint8_t>(addr).get(mem);
+    std::string out;
+    const uint32_t n = std::min(len, max_bytes);
+    out.reserve(n * 2 + 8);
+    static const char digits[] = "0123456789abcdef";
+    for (uint32_t i = 0; i < n; i++) {
+        out += digits[p[i] >> 4];
+        out += digits[p[i] & 0xf];
+    }
+    if (n < len)
+        out += "...";
+    return out;
+}
+
+static void pso2_trace_call(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id, const ImportFn *fn) {
+    const std::string name = import_name(nid);
+    const uint32_t a0 = read_reg(cpu, 0), a1 = read_reg(cpu, 1), a2 = read_reg(cpu, 2), a3 = read_reg(cpu, 3);
+    const Address lr = read_lr(cpu);
+    std::string pre;
+    if (name == "sceNetSend" || name == "sceNetSendto")
+        pre = " out=" + pso2_hex(emuenv.mem, a1, a2);
+    else if (name == "sceNetConnect" || name == "sceNetBind")
+        pre = " addr=" + pso2_hex(emuenv.mem, a1, 16);
+    (*fn)(emuenv, cpu, thread_id);
+    const uint32_t ret = read_reg(cpu, 0);
+    std::string post;
+    if ((name == "sceNetRecv" || name == "sceNetRecvfrom") && static_cast<int32_t>(ret) > 0)
+        post = " in=" + pso2_hex(emuenv.mem, a1, ret);
+    LOG_INFO("[PSO2T] TID {} {} ({:#x}, {:#x}, {:#x}, {:#x}) = {:#x} lr {:#x}{}{}", thread_id, name, a0, a1, a2, a3, ret, lr, pre, post);
+}
+
 void call_import(EmuEnvState &emuenv, CPUState &cpu, uint32_t nid, SceUID thread_id) {
     // HLE - call our C++ function
+    if (pso2_trace_wanted(nid)) {
+        if (const ImportFn *fn = resolve_import(nid)) {
+            pso2_trace_call(emuenv, cpu, nid, thread_id, fn);
+            return;
+        }
+    }
     if (emuenv.kernel.debugger.watch_import_calls) {
         const std::unordered_set<uint32_t> hle_nid_blacklist = {
             0xB295EB61, // sceKernelGetTLSAddr
