@@ -17,6 +17,10 @@
 
 #include <renderer/vulkan/surface_cache.h>
 
+#include <set>
+#include <string>
+#include <tuple>
+
 #include <gxm/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
 #include <renderer/vulkan/state.h>
@@ -387,6 +391,13 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
 std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport) {
     // Create the key to access the cache struct
     const uint32_t address = (texture.data_addr << 2);
+    // T6 (pso2): log why a texture overlapping a color surface is (not) sourced from the surface cache, once per key
+    const auto t6_log = [&](const char *result, uint32_t surface_addr) {
+        static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, std::string>> t6_seen;
+        if (t6_seen.insert({ address, gxm::get_width(texture), gxm::get_height(texture), static_cast<uint32_t>(gxm::get_format(texture)), result }).second)
+            LOG_INFO("[T6] texture 0x{:08X} {}x{} fmt 0x{:08X} type 0x{:08X} -> surface 0x{:08X}: {}", address, gxm::get_width(texture), gxm::get_height(texture),
+                static_cast<uint32_t>(gxm::get_format(texture)), static_cast<uint32_t>(texture.texture_type()), surface_addr, result);
+    };
 
     const uint32_t original_width = gxm::get_width(texture);
     const uint32_t original_height = gxm::get_height(texture);
@@ -409,9 +420,11 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     if (!overlap)
         return std::nullopt;
 
-    if (*ite->second->dirty)
+    if (*ite->second->dirty) {
         // Guest wrote to the surface backing memory since it was rendered, so GPU data is stale.
+        t6_log("miss dirty", ite->first);
         return std::nullopt;
+    }
 
     const vk::ComponentMapping swizzle = texture::translate_swizzle(gxm::get_format(texture));
     vk::Format vk_format = color::translate_format(base_format);
@@ -456,28 +469,37 @@ std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_tex
     ColorSurfaceCacheInfo &info = *ite->second;
 
     if ((base_format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8 || info.format == SCE_GXM_COLOR_BASE_FORMAT_U8U8U8)
-        && base_format != info.format)
+        && base_format != info.format) {
         // don't even try to match u8u8u8 with something else
+        t6_log("miss u8u8u8", ite->first);
         return std::nullopt;
+    }
 
-    if (tiling != info.tiling || info.stride_bytes != stride_bytes)
+    if (tiling != info.tiling || info.stride_bytes != stride_bytes) {
         // if the tiling is different, also don't try to match them
         // about the strides, I've yet to see a case where the byte stride is different
+        t6_log(fmt::format("miss tiling {} vs {} / stride {} vs {}", static_cast<int>(tiling), static_cast<int>(info.tiling), stride_bytes, info.stride_bytes).c_str(), ite->first);
         return std::nullopt;
+    }
 
     // Check if we can use this surface
     bool addr_in_range_of_cache = ((address + total_surface_size) <= (ite->first + info.total_bytes + 4));
 
-    if (ite->first != address && !addr_in_range_of_cache)
+    if (ite->first != address && !addr_in_range_of_cache) {
         // persona 4 sample from the top of a texture while the bottom wasn't rendered to, the fact that both the surface and
         // the texture start at the same location should be enough
+        t6_log("miss range", ite->first);
         return std::nullopt;
+    }
 
     uint32_t bytes_per_pixel_requested = gxm::bits_per_pixel(base_format) / 8;
     uint32_t bytes_per_pixel_in_store = gxm::bits_per_pixel(info.format) / 8;
 
-    if (std::max(bytes_per_pixel_requested, bytes_per_pixel_in_store) % std::min(bytes_per_pixel_requested, bytes_per_pixel_in_store) != 0)
+    if (std::max(bytes_per_pixel_requested, bytes_per_pixel_in_store) % std::min(bytes_per_pixel_requested, bytes_per_pixel_in_store) != 0) {
+        t6_log("miss bpp", ite->first);
         return std::nullopt;
+    }
+    t6_log("hit", ite->first);
 
     // TODO: this is true only for linear textures (and also kind of for tiled textures) (and in this case start_x = 0),
     // for swizzled textures this is different

@@ -18,6 +18,8 @@
 #include <renderer/vulkan/functions.h>
 
 #include <cstdlib>
+#include <set>
+#include <tuple>
 
 #include <gxm/functions.h>
 #include <renderer/vulkan/gxm_to_vulkan.h>
@@ -349,7 +351,9 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // T6 (pso2): mask-update draws write writing_mask as color on Vulkan. Log them; PSO2_T6_SKIP_MASK=1 skips them like the OpenGL backend
         static uint32_t t6_mask_draws = 0;
         static const bool t6_skip_mask = std::getenv("PSO2_T6_SKIP_MASK") != nullptr;
-        if (t6_mask_draws++ < 200)
+        static std::set<std::tuple<uint32_t, float, size_t>> t6_mask_seen;
+        t6_mask_draws++;
+        if (t6_mask_seen.insert({ context.record.color_surface.data.address(), context.record.writing_mask, count }).second)
             LOG_INFO("[T6] mask-update draw #{} surface 0x{:08X} {}x{} writing_mask {} count {}{}", t6_mask_draws, context.record.color_surface.data.address(),
                 context.record.color_surface.width, context.record.color_surface.height, context.record.writing_mask, count, t6_skip_mask ? " (skipped)" : "");
         if (t6_skip_mask)
