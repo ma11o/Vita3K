@@ -36,6 +36,8 @@
 #define XXH_INLINE_ALL
 #include <xxhash.h>
 
+#include <set>
+
 namespace renderer::vulkan {
 
 // Size of the record containing what is needed for the pipeline construction (what is after is dynamic state)
@@ -456,8 +458,13 @@ static const vk::SpecializationInfo srgb_info_false = {
 };
 
 vk::PipelineShaderStageCreateInfo PipelineCache::retrieve_shader(const SceGxmProgram *program, const Sha256Hash &hash, bool is_vertex, bool maskupdate, MemState &mem, const shader::Hints &hints, bool is_srgb) {
-    if (maskupdate)
+    if (maskupdate) {
         LOG_WARN_ONCE("Mask not implemented in the vulkan renderer!");
+        // also log which shader asked for it (once per shader hash)
+        static std::set<Sha256Hash> mask_logged;
+        if (mask_logged.insert(hash).second)
+            LOG_WARN("Mask update requested by {} shader {}", is_vertex ? "vertex" : "fragment", hex_string(hash));
+    }
 
     const vk::ShaderModule shader_compiling = std::bit_cast<vk::ShaderModule>(~0ULL);
 
