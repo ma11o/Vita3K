@@ -250,7 +250,13 @@ COMMAND(handle_transfer_downscale) {
             if (ctx == nullptr) {
                 LOG_ERROR("Failed to get ffmpeg context for format 0x{:0X}", fmt::underlying(src->format));
             } else {
-                sws_scale(ctx, &src_ptr, &src->stride, 0, src->height, &dst_ptr, &dst->stride);
+                // sws_scale reads four plane pointers and four strides; passing &src->stride would read past
+                // the end of the heap-allocated SceGxmTransferImage (stride is its last member)
+                const uint8_t *const src_slices[4] = { src_ptr, nullptr, nullptr, nullptr };
+                const int src_strides[4] = { src->stride, 0, 0, 0 };
+                uint8_t *const dst_slices[4] = { dst_ptr, nullptr, nullptr, nullptr };
+                const int dst_strides[4] = { dst->stride, 0, 0, 0 };
+                sws_scale(ctx, src_slices, src_strides, 0, src->height, dst_slices, dst_strides);
                 sws_freeContext(ctx);
             }
 
