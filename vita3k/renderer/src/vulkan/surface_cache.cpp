@@ -63,6 +63,9 @@ static bool format_need_additional_memory(SceGxmColorBaseFormat format) {
 
 namespace renderer::vulkan {
 
+// set while surface sync writes GPU data to guest memory: this write must not make the surface look dirty
+static thread_local bool writing_surface_sync = false;
+
 static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     const bool trap_reads = (info.tiling == SurfaceTiling::Linear
         && format_support_surface_sync(info.format));
@@ -85,7 +88,7 @@ static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
 
     add_protect(mem, addr_start, addr_end - addr_start, perm,
         [dirty, need_sync](Address, bool write) {
-            if (write && dirty)
+            if (write && dirty && !writing_surface_sync)
                 *dirty = true;
             if (need_sync)
                 *need_sync = true;
@@ -380,6 +383,12 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
         *info_added.need_surface_sync = color->surfaceType == SCE_GXM_COLOR_SURFACE_LINEAR;
     } else {
         protect_surface(mem, info_added);
+    }
+
+    if (!state.features.enable_memory_mapping) {
+        // without memory mapping, sync every linear surface: waiting for the first guest access (the memory trap) is too late,
+        // the guest would read the content of the scene before
+        *info_added.need_surface_sync = color->surfaceType == SCE_GXM_COLOR_SURFACE_LINEAR && format_support_surface_sync(info_added.format);
     }
 
     // it's not impossible that this surface will be rendered once and only used after, so do not skip any shader on it
@@ -1220,10 +1229,8 @@ bool VKSurfaceCache::check_for_surface(MemState &mem, Address source_address, Ca
 }
 
 ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
-    // surface sync is supported only if memory mapping is enabled
-    if (!state.features.enable_memory_mapping)
-        return nullptr;
-
+    // without memory mapping, the surface is copied to a staging buffer here and written to guest memory
+    // by perform_post_surface_sync once the scene is done (see VKContext::stop_recording)
     if (last_written_surface == nullptr || !*last_written_surface->need_surface_sync)
         return nullptr;
 
@@ -1276,14 +1283,16 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
 
     vk::Buffer buffer;
     uint32_t offset;
-    if (format_need_additional_memory(last_written_surface->format)) {
+    if (format_need_additional_memory(last_written_surface->format) || !state.features.enable_memory_mapping) {
         if (!last_written_surface->copy_buffer)
             last_written_surface->copy_buffer = std::make_unique<vkutil::Buffer>();
 
         vkutil::Buffer &copy_buffer = *last_written_surface->copy_buffer;
 
         if (!copy_buffer.buffer) {
-            copy_buffer.size = last_written_surface->stride_bytes * last_written_surface->original_height;
+            // the image may use more bytes per pixel than the guest surface (U8U8U8 is emulated with 4 components)
+            const uint32_t pixel_stride = (last_written_surface->stride_bytes * 8) / gxm::bits_per_pixel(last_written_surface->format);
+            copy_buffer.size = pixel_stride * last_written_surface->original_height * vk::blockSize(last_written_surface->texture.format);
             copy_buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
         }
 
@@ -1377,6 +1386,16 @@ void VKSurfaceCache::perform_post_surface_sync(const MemState &mem, ColorSurface
     const uint32_t pixel_stride = (surface->stride_bytes * 8) / gxm::bits_per_pixel(surface->format);
     const uint32_t nb_pixels = pixel_stride * surface->original_height;
     uint8_t *pixels = surface->data.cast<uint8_t>().get(mem);
+
+    writing_surface_sync = true;
+    perform_post_surface_sync_inner(surface, pixels, pixel_stride, nb_pixels);
+    writing_surface_sync = false;
+}
+
+void VKSurfaceCache::perform_post_surface_sync_inner(ColorSurfaceCacheInfo *surface, uint8_t *pixels, uint32_t pixel_stride, uint32_t nb_pixels) {
+    if (!state.features.enable_memory_mapping && !format_need_additional_memory(surface->format))
+        // the GPU copied the surface to a staging buffer, not to guest memory
+        std::memcpy(pixels, surface->copy_buffer->mapped_data, surface->stride_bytes * surface->original_height);
 
     if (format_need_additional_memory(surface->format)) {
         // special case, use a custom function
@@ -1520,44 +1539,6 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
     memcpy(frame.data(), temp_buff.mapped_data, frame.size() * 4);
 
     return frame;
-}
-
-bool VKSurfaceCache::t6_readback(MemState &mem, Address address) {
-    // T6 (pso2) experiment: copy a rendered color surface back to guest memory without memory mapping (macOS).
-    // Synchronous and slow (waits for the GPU); only for checking what the game reads back.
-    auto it = color_address_lookup.find(address);
-    if (it == color_address_lookup.end())
-        return false;
-    ColorSurfaceCacheInfo &info = *it->second;
-    if (info.tiling != SurfaceTiling::Linear || state.res_multiplier != 1.0f || format_need_additional_memory(info.format))
-        return false;
-
-    const uint32_t size = info.stride_bytes * info.original_height;
-    vkutil::Buffer buffer;
-    buffer.size = size;
-    buffer.init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
-
-    state.device.waitIdle();
-    vk::CommandBuffer cmd = vkutil::create_single_time_command(state.device, state.general_command_pool);
-    const uint32_t pixel_stride = (info.stride_bytes * 8) / gxm::bits_per_pixel(info.format);
-    vk::BufferImageCopy copy{
-        .bufferOffset = 0,
-        .bufferRowLength = pixel_stride,
-        .bufferImageHeight = info.original_height,
-        .imageSubresource = vkutil::color_subresource_layer,
-        .imageOffset = { 0, 0, 0 },
-        .imageExtent = { info.original_width, info.original_height, 1 }
-    };
-    cmd.copyImageToBuffer(info.texture.image, vk::ImageLayout::eGeneral, buffer.buffer, copy);
-    vkutil::end_single_time_command(state.device, state.general_queue, state.general_command_pool, cmd);
-
-    // the backing memory is protected: the first write faults, runs the protect callback and unprotects it
-    std::memcpy(Ptr<uint8_t>(address).get(mem), buffer.mapped_data, size);
-
-    static uint32_t t6_count = 0;
-    if (t6_count++ < 50)
-        LOG_INFO("[T6] readback surface 0x{:08X} {}x{} ({} bytes)", address, info.original_width, info.original_height, size);
-    return true;
 }
 
 } // namespace renderer::vulkan

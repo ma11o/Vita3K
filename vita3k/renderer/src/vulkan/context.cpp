@@ -462,7 +462,9 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     }
 
     ColorSurfaceCacheInfo *surface_info = nullptr;
-    if (state.features.enable_memory_mapping && !state.disable_surface_sync && submit)
+    // without memory mapping (macOS), always sync: nothing else ever writes rendered data to guest memory,
+    // and games reading it on the CPU are broken (disable_surface_sync is on by default)
+    if ((!state.features.enable_memory_mapping || !state.disable_surface_sync) && submit)
         surface_info = state.surface_cache.perform_surface_sync();
 
     prerender_cmd.end();
@@ -494,6 +496,14 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     state.general_queue.submit(submit_info, fence);
     cmdbuffers_to_submit.clear();
     state.frame().rendered_fences.push_back(fence);
+
+    if (!state.features.enable_memory_mapping && surface_info) {
+        // the notifications are signaled right after this returns, so the guest memory must be up to date by then
+        auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
+        if (result != vk::Result::eSuccess)
+            LOG_ERROR("Could not wait for fences.");
+        state.surface_cache.perform_post_surface_sync(mem, surface_info);
+    }
 
     if (state.features.enable_memory_mapping) {
         // send it to the wait queue
