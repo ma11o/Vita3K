@@ -29,3 +29,4 @@ void refresh_controllers(CtrlState &state, EmuEnvState &emuenv);
 
 // pso2_vita_offline (T14): hold the buttons in `mask` (SCE_CTRL_*) on port 1 for `ms` milliseconds.
 void pso2_inject_press(uint32_t mask, int ms);
+void pso2_inject_stick(bool right, float x, float y, int ms);

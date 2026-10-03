@@ -731,6 +731,17 @@ static void pso2_input_loop(EmuEnvState *emuenv) {
                     pso2_inject_press(mask, ms);
                     LOG_INFO("[PSO2I] {} {} {}ms", cmd, btn, ms);
                 }
+            } else if (cmd == "stick") {
+                // stick <l|r> <x> <y> <ms>
+                std::stringstream as(arg);
+                std::string which;
+                float x = 0, y = 0;
+                int ms = 0;
+                as >> which >> x >> y >> ms;
+                if ((which == "l" || which == "r") && ms > 0) {
+                    pso2_inject_stick(which == "r", std::clamp(x, -1.f, 1.f), std::clamp(y, -1.f, 1.f), ms);
+                    LOG_INFO("[PSO2I] stick {} {} {} {}ms", which, x, y, ms);
+                }
             } else if (cmd == "shot") {
                 if (frame_dir.empty())
                     LOG_INFO("[PSO2I] shot needs PSO2_FRAME_DIR");

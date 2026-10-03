@@ -38,6 +38,34 @@ void pso2_inject_press(uint32_t mask, int ms) {
     g_inject_held.emplace_back(mask, std::chrono::steady_clock::now() + std::chrono::milliseconds(ms));
 }
 
+// sticks: right = false for the left stick. x, y in -1..1 (y negative = up). The newest unexpired entry per stick wins.
+struct Pso2Stick {
+    bool right;
+    float x, y;
+    std::chrono::steady_clock::time_point until;
+};
+static std::vector<Pso2Stick> g_inject_sticks;
+
+void pso2_inject_stick(bool right, float x, float y, int ms) {
+    std::lock_guard<std::mutex> lock(g_inject_mutex);
+    g_inject_sticks.push_back({ right, x, y, std::chrono::steady_clock::now() + std::chrono::milliseconds(ms) });
+}
+
+static void pso2_inject_axes(float *axes) {
+    std::lock_guard<std::mutex> lock(g_inject_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    for (auto it = g_inject_sticks.begin(); it != g_inject_sticks.end();) {
+        if (it->until <= now) {
+            it = g_inject_sticks.erase(it);
+        } else {
+            const int base = it->right ? 2 : 0;
+            axes[base] = it->x;
+            axes[base + 1] = it->y;
+            ++it;
+        }
+    }
+}
+
 static uint32_t pso2_inject_buttons() {
     std::lock_guard<std::mutex> lock(g_inject_mutex);
     const auto now = std::chrono::steady_clock::now();
@@ -308,6 +336,7 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
 
     if (port == 1) {
         buttons |= pso2_inject_buttons();
+        pso2_inject_axes(axes.data());
     }
 
     reset_axes();
