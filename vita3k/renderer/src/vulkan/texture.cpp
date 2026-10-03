@@ -27,6 +27,8 @@
 #include <util/align.h>
 #include <vkutil/vkutil.h>
 
+#include <cstdlib>
+
 namespace renderer::vulkan {
 
 // return if this format can be used to read a depth stencil buffer
@@ -290,8 +292,12 @@ bool VKTextureCache::init(const bool hashless_texture_cache, const fs::path &tex
     support_a2rgb10 = static_cast<bool>(a2rgb10_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
     // powerVR only
+    // T15 (pso2_vita_offline): translate_format maps every PVRT base format to R8G8B8A8, so the
+    // native path uploaded the compressed blocks as raw RGBA (colored noise; MoltenVK on Apple GPUs
+    // exposes VK_IMG_format_pvrtc). Always decode on the CPU until a compressed upload exists.
+    // PSO2_NATIVE_PVRT=1 restores the old detection.
     const vk::FormatProperties pvrt_support = state.physical_device.getFormatProperties(vk::Format::ePvrtc12BppUnormBlockIMG);
-    support_pvrt = static_cast<bool>(pvrt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
+    support_pvrt = getenv("PSO2_NATIVE_PVRT") && static_cast<bool>(pvrt_support.optimalTilingFeatures & vk::FormatFeatureFlagBits::eSampledImage);
 
     // check for dxt support
     const vk::FormatProperties dxt_support = state.physical_device.getFormatProperties(vk::Format::eBc1RgbaSrgbBlock);
