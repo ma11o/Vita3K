@@ -16,7 +16,6 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <gxm/functions.h>
-#include <mem/functions.h>
 #include <gxm/types.h>
 #include <renderer/commands.h>
 #include <renderer/driver_functions.h>
@@ -224,16 +223,6 @@ COMMAND(handle_transfer_downscale) {
     const uint32_t pixel_bytes = gxm::get_bits_per_pixel(src->format) / 8;
     src->address = (src->address.cast<uint8_t>() + src->y * src->stride + src->x * pixel_bytes).cast<void>();
     dst->address = (dst->address.cast<uint8_t>() + dst->y * dst->stride + dst->x * pixel_bytes).cast<void>();
-
-    {
-        // T6 (pso2) workaround: skip a downscale whose memory is no longer mapped (seen right after entering the character creation)
-        const Address s0 = src->address.address(), d0 = dst->address.address();
-        if (!is_valid_addr_range(mem, s0, s0 + static_cast<uint32_t>(std::abs(src->stride)) * src->height)
-            || !is_valid_addr_range(mem, d0, d0 + static_cast<uint32_t>(std::abs(dst->stride)) * (src->height / 2))) {
-            LOG_WARN("[T6] skipping transfer downscale with unmapped memory: src 0x{:08X} dst 0x{:08X}", s0, d0);
-            return;
-        }
-    }
 
     // only rgb formats are supported by the PS Vita for downscaling
     vulkan::CallbackRequestFunction downscale_operation = [&mem, src, dst]() {
