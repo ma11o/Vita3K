@@ -20,6 +20,8 @@
 #include <modules/module_parent.h>
 
 #include <span>
+#include <sstream>
+#include <thread>
 #include <stack>
 #if defined(__x86_64__) && !defined(__APPLE__)
 #include <xxh_x86dispatch.h>
@@ -1006,6 +1008,7 @@ struct SceGxmContext {
     // this one is atomic as it is read from one thread and written to by another
     std::atomic<size_t> command_last_free_pos;
     uint32_t command_allocator_size = 0;
+    uint8_t *alloc_space_start_host = nullptr; // T9
 
     bool last_precomputed = false;
 
@@ -1111,6 +1114,8 @@ struct SceGxmContext {
             actual_size = state.vdm_buffer_size;
 
             if (state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
+                alloc_space_start_host = state.vdm_buffer.cast<uint8_t>().get(mem);
+                LOG_INFO("[T9] immediate ring: vdm 0x{:08X} size 0x{:X}, {} commands of {} bytes", state.vdm_buffer.address(), state.vdm_buffer_size, state.vdm_buffer_size / sizeof(renderer::Command), sizeof(renderer::Command));
                 command_allocator_size = state.vdm_buffer_size / sizeof(renderer::Command);
                 command_next_free_pos = 0;
                 command_last_free_pos = command_allocator_size - 1;
@@ -1163,16 +1168,32 @@ struct SceGxmContext {
         return reinterpret_cast<T *>(linearly_allocate(kern, mem, thread_id, sizeof(T)));
     }
 
+    // T9 (pso2_vita_offline): diagnostics for the immediate-context command ring
+    std::atomic<std::thread::id> t9_last_alloc_thread{};
+    std::atomic<uint64_t> t9_host_allocs{ 0 };
+    std::atomic<int> t9_logs{ 0 };
+    size_t t9_freed = 0; // number of ring commands freed (render thread only)
+
     renderer::Command *allocate_new_command(KernelState &kern, const MemState &mem, SceUID current_thread_id) {
         renderer::Command *new_command = nullptr;
 
         if (state.type == SCE_GXM_CONTEXT_TYPE_IMMEDIATE) {
+            const auto me = std::this_thread::get_id();
+            const auto prev = t9_last_alloc_thread.exchange(me);
+            if (prev != std::thread::id{} && prev != me && t9_logs.fetch_add(1) < 200) {
+                std::ostringstream a, b;
+                a << me;
+                b << prev;
+                LOG_INFO("[T9] ring alloc from another host thread {} (previous {}) next={} last={}", a.str(), b.str(), command_next_free_pos, command_last_free_pos.load());
+            }
             if (command_allocator_size > 0 && command_next_free_pos <= command_last_free_pos.load(std::memory_order_acquire)) {
                 size_t offset = command_next_free_pos % command_allocator_size;
                 command_next_free_pos++;
                 new_command = alloc_space.cast<renderer::Command>().get(mem) + offset;
                 new (new_command) renderer::Command;
             } else {
+                if (t9_host_allocs.fetch_add(1) % 10000 == 0)
+                    LOG_INFO("[T9] ring full, host alloc (count {}) next={} last={}", t9_host_allocs.load(), command_next_free_pos, command_last_free_pos.load());
                 new_command = new renderer::Command;
                 new_command->flags |= renderer::Command::FLAG_FROM_HOST;
             }
@@ -1191,6 +1212,13 @@ struct SceGxmContext {
             if (cmd->flags & renderer::Command::FLAG_FROM_HOST) {
                 delete cmd;
             } else {
+                if (command_allocator_size > 0) {
+                    const size_t idx = cmd - reinterpret_cast<renderer::Command *>(alloc_space_start_host);
+                    const size_t expected = t9_freed % command_allocator_size;
+                    if (idx != expected && t9_logs.fetch_add(1) < 200)
+                        LOG_ERROR("[T9] ring free out of order: slot {} expected {} (opcode {}, freed {}, next {}, last {})", idx, expected, static_cast<int>(cmd->opcode), t9_freed, command_next_free_pos, command_last_free_pos.load());
+                }
+                t9_freed++;
                 command_last_free_pos.fetch_add(1, std::memory_order_release);
             }
         }
@@ -2708,6 +2736,18 @@ EXPORT(int, sceGxmFinish, SceGxmContext *context) {
     renderer::Context *renderer_context = context->renderer.get();
     if (!renderer_context)
         return RET_ERROR(SCE_GXM_ERROR_INVALID_POINTER);
+
+    {
+        static std::atomic<int> t9_finish_logs{ 0 };
+        size_t pending = 0;
+        for (renderer::Command *c = renderer_context->command_list.first; c && pending < 100000; c = c->next)
+            pending++;
+        if (t9_finish_logs.fetch_add(1) < 300) {
+            std::ostringstream t;
+            t << std::this_thread::get_id();
+            LOG_INFO("[T9] sceGxmFinish guest thread {} host {} active {} unsubmitted commands {} next={} last={}", thread_id, t.str(), context->state.active, pending, context->command_next_free_pos, context->command_last_free_pos.load());
+        }
+    }
 
     // Wait on this context's rendering finish code.
     renderer::finish(*emuenv.renderer, renderer_context);
