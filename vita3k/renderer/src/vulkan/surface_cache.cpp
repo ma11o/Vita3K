@@ -83,15 +83,8 @@ static void protect_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
     // Don't track dirty for small surfaces to avoid false positives from unrelated writes
     std::shared_ptr<bool> dirty = small_surface ? nullptr : info.dirty;
 
-    const Address t6_surface = info.data.address();
     add_protect(mem, addr_start, addr_end - addr_start, perm,
-        [dirty, need_sync, t6_surface](Address fault, bool write) {
-            {
-                // T6 (pso2): log the guest touching the backing memory of a GPU-rendered surface (the first 100 times)
-                static uint32_t t6_count = 0;
-                if (t6_count++ < 100)
-                    LOG_INFO("[T6] guest {} of surface 0x{:08X} at 0x{:08X}", write ? "write" : "read", t6_surface, fault);
-            }
+        [dirty, need_sync](Address, bool write) {
             if (write && dirty)
                 *dirty = true;
             if (need_sync)
@@ -398,8 +391,11 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
 std::optional<TextureLookupResult> VKSurfaceCache::retrieve_color_surface_as_texture(const SceGxmTexture &texture, const SceGxmColorBaseFormat base_format, TextureViewport *texture_viewport) {
     // Create the key to access the cache struct
     const uint32_t address = (texture.data_addr << 2);
-    // T6 (pso2): log why a texture overlapping a color surface is (not) sourced from the surface cache, once per key
+    // T6 (pso2): log why a texture overlapping a color surface is (not) sourced from the surface cache, once per key, when PSO2_T6_LOG is set
     const auto t6_log = [&](const char *result, uint32_t surface_addr) {
+        static const bool t6_enabled = std::getenv("PSO2_T6_LOG") != nullptr;
+        if (!t6_enabled)
+            return;
         static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t, std::string>> t6_seen;
         if (t6_seen.insert({ address, gxm::get_width(texture), gxm::get_height(texture), static_cast<uint32_t>(gxm::get_format(texture)), result }).second)
             LOG_INFO("[T6] texture 0x{:08X} {}x{} fmt 0x{:08X} type 0x{:08X} -> surface 0x{:08X}: {}", address, gxm::get_width(texture), gxm::get_height(texture),

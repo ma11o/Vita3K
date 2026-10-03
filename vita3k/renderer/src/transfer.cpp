@@ -143,9 +143,10 @@ COMMAND(handle_transfer_copy) {
     SceGxmTransferType dst_type = helper.pop<SceGxmTransferType>();
 
     {
-        // T6 (pso2): log transfer copies (on macOS the source is guest memory, never the GPU surface)
+        // T6 (pso2): log transfer copies (on macOS the source is guest memory, never the GPU surface) when PSO2_T6_LOG is set
+        static const bool t6_log = std::getenv("PSO2_T6_LOG") != nullptr;
         static uint32_t t6_copies = 0;
-        if (t6_copies++ < 300)
+        if (t6_log && t6_copies++ < 300)
             LOG_INFO("[T6] transfer copy #{} src 0x{:08X} ({},{} {}x{} stride {} type {}) -> dst 0x{:08X} ({},{} {}x{} stride {} type {}) fmt 0x{:X}", t6_copies,
                 images[0].address.address(), images[0].x, images[0].y, images[0].width, images[0].height, images[0].stride, fmt::underlying(src_type),
                 images[1].address.address(), images[1].x, images[1].y, images[1].width, images[1].height, images[1].stride, fmt::underlying(dst_type), fmt::underlying(src_fmt));
@@ -207,9 +208,10 @@ COMMAND(handle_transfer_downscale) {
     SceGxmTransferImage *dst = helper.pop<SceGxmTransferImage *>();
 
     {
-        // T6 (pso2): log transfer downscales
+        // T6 (pso2): log transfer downscales when PSO2_T6_LOG is set
+        static const bool t6_log = std::getenv("PSO2_T6_LOG") != nullptr;
         static uint32_t t6_downscales = 0;
-        if (t6_downscales++ < 300)
+        if (t6_log && t6_downscales++ < 300)
             LOG_INFO("[T6] transfer downscale #{} src 0x{:08X} ({},{} {}x{} stride {}) -> dst 0x{:08X} ({},{} {}x{} stride {}) fmt 0x{:X}", t6_downscales,
                 src->address.address(), src->x, src->y, src->width, src->height, src->stride,
                 dst->address.address(), dst->x, dst->y, dst->width, dst->height, dst->stride, fmt::underlying(src->format));

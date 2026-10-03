@@ -763,11 +763,12 @@ void TextureCache::cache_and_bind_texture(const SceGxmTexture &gxm_texture, MemS
             import_upload_texture();
         else
         {
-            // T6 (pso2): log textures uploaded from guest memory with their share of zero bytes, once per (address, size, format)
+            // T6 (pso2): log textures uploaded from guest memory with their share of zero bytes, once per (address, size, format), when PSO2_T6_LOG is set
+            static const bool t6_log = std::getenv("PSO2_T6_LOG") != nullptr;
             static std::set<std::tuple<uint32_t, uint32_t, uint32_t, uint32_t>> t6_seen;
             const uint32_t addr = gxm_texture.data_addr << 2;
             const uint32_t w = gxm::get_width(gxm_texture), h = gxm::get_height(gxm_texture), f = static_cast<uint32_t>(gxm::get_format(gxm_texture));
-            if (addr && t6_seen.insert({ addr, w, h, f }).second) {
+            if (t6_log && addr && t6_seen.insert({ addr, w, h, f }).second) {
                 const uint8_t *data = Ptr<const uint8_t>(addr).get(mem);
                 const size_t n = std::min<size_t>(info->texture_size, 1 << 20);
                 const size_t zeros = std::count(data, data + n, uint8_t{ 0 });
