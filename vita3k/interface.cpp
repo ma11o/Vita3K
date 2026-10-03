@@ -22,11 +22,18 @@
 
 #include <config/state.h>
 #include <ctime>
+#include <ctrl/functions.h>
+#include <fcntl.h>
+#include <map>
+#include <sstream>
+#include <thread>
+#include <unistd.h>
 #include <ctrl/state.h>
 #include <dialog/state.h>
 #include <display/functions.h>
 #include <display/state.h>
 #include <emuenv/state.h>
+#include <ime/state.h>
 #include <io/functions.h>
 #include <io/vfs.h>
 #include <kernel/state.h>
@@ -613,6 +620,146 @@ void take_screenshot(EmuEnvState &emuenv) {
     }
 }
 
+
+// pso2_vita_offline (T14): drive the game from outside without host key events or a visible window.
+//   PSO2_INPUT=<fifo or file>  one command per line: press|hold <btn[+btn]> <ms>, shot <name>, text <ascii>
+//   PSO2_FRAME_DIR=<dir> [PSO2_FRAME_EVERY=<sec>]  PNGs of the displayed frame (periodic, and for `shot`)
+static void pso2_save_frame(EmuEnvState &emuenv, const fs::path &file) {
+    uint32_t width, height;
+    auto frame = get_current_app_frame(emuenv, width, height);
+    if (frame.empty()) {
+        LOG_INFO("[PSO2I] frame not available: {}", file);
+        return;
+    }
+    const bool ok = stbi_write_png(fs_utils::path_to_utf8(file).c_str(), width, height, 4, frame.data(), width * 4) == 1;
+    LOG_INFO("[PSO2I] frame {} {}x{} {}", file, width, height, ok ? "saved" : "FAILED");
+}
+
+static uint32_t pso2_button_mask(const std::string &spec) {
+    static const std::map<std::string, uint32_t> names = {
+        { "up", SCE_CTRL_UP }, { "down", SCE_CTRL_DOWN }, { "left", SCE_CTRL_LEFT }, { "right", SCE_CTRL_RIGHT },
+        { "circle", SCE_CTRL_CIRCLE }, { "cross", SCE_CTRL_CROSS }, { "triangle", SCE_CTRL_TRIANGLE }, { "square", SCE_CTRL_SQUARE },
+        { "start", SCE_CTRL_START }, { "select", SCE_CTRL_SELECT }, { "l", SCE_CTRL_L1 }, { "r", SCE_CTRL_R1 }, { "l2", SCE_CTRL_L2 }, { "r2", SCE_CTRL_R2 }
+    };
+    uint32_t mask = 0;
+    std::stringstream ss(spec);
+    std::string part;
+    while (std::getline(ss, part, '+')) {
+        auto it = names.find(part);
+        if (it == names.end()) {
+            LOG_INFO("[PSO2I] unknown button '{}'", part);
+            return 0;
+        }
+        mask |= it->second;
+    }
+    return mask;
+}
+
+static void pso2_ime_text(EmuEnvState &emuenv, const std::string &text) {
+    // wait for the game to open an IME dialog (sceImeDialogInit), fill it and finish it the way the Enter key does
+    for (int i = 0; i < 600; i++) {
+        {
+            DialogState &dialog = emuenv.common_dialog;
+            std::lock_guard<std::recursive_mutex> dlock(dialog.mutex);
+            if (dialog.type == IME_DIALOG && dialog.status == SCE_COMMON_DIALOG_STATUS_RUNNING && dialog.active_ime) {
+                Ime &ime = *dialog.active_ime;
+                std::lock_guard lock(ime.mutex);
+                std::u16string str = string_utils::utf8_to_utf16(text);
+                if (str.size() > dialog.ime.max_length)
+                    str.resize(dialog.ime.max_length);
+                ime.str = str;
+                ime.caretIndex = static_cast<uint32_t>(str.size());
+                if (dialog.ime.result) {
+                    memcpy(dialog.ime.result, str.c_str(), str.size() * sizeof(uint16_t));
+                    dialog.ime.result[str.size()] = 0;
+                }
+                snprintf(dialog.ime.text, sizeof(dialog.ime.text), "%s", text.c_str());
+                ime.event_id = SCE_IME_EVENT_PRESS_ENTER;
+                dialog.ime.status = SCE_IME_DIALOG_BUTTON_ENTER;
+                dialog.status = SCE_COMMON_DIALOG_STATUS_FINISHED;
+                dialog.result = SCE_COMMON_DIALOG_RESULT_OK;
+                LOG_INFO("[PSO2I] ime text '{}' ({} chars, max {}) submitted", text, str.size(), dialog.ime.max_length);
+                return;
+            }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    }
+    LOG_INFO("[PSO2I] ime text '{}': no IME dialog within 30 s", text);
+}
+
+static void pso2_input_loop(EmuEnvState *emuenv) {
+    const char *input_path = getenv("PSO2_INPUT");
+    const char *frame_dir_env = getenv("PSO2_FRAME_DIR");
+    const char *every_env = getenv("PSO2_FRAME_EVERY");
+    const fs::path frame_dir = frame_dir_env ? fs::path(frame_dir_env) : fs::path();
+    const double every = every_env ? atof(every_env) : 0.0;
+    if (!frame_dir.empty())
+        fs::create_directories(frame_dir);
+
+    int fd = -1;
+    if (input_path) {
+        fd = open(input_path, O_RDONLY | O_NONBLOCK | O_CREAT, 0644);
+        LOG_INFO("[PSO2I] input {} fd={}", input_path, fd);
+    }
+    std::string pending;
+    auto last_frame = std::chrono::steady_clock::now();
+    int frame_no = 0;
+    while (true) {
+        char buf[512];
+        ssize_t n = fd >= 0 ? read(fd, buf, sizeof(buf)) : 0;
+        if (n > 0)
+            pending.append(buf, n);
+        size_t nl;
+        while ((nl = pending.find('\n')) != std::string::npos) {
+            std::string line = pending.substr(0, nl);
+            pending.erase(0, nl + 1);
+            while (!line.empty() && (line.back() == '\r' || line.back() == ' '))
+                line.pop_back();
+            std::string cmd, arg;
+            std::stringstream ss(line);
+            ss >> cmd;
+            std::getline(ss, arg);
+            if (!arg.empty() && arg[0] == ' ')
+                arg.erase(0, 1);
+            if (cmd == "press" || cmd == "hold") {
+                std::stringstream as(arg);
+                std::string btn;
+                int ms = 0;
+                as >> btn >> ms;
+                const uint32_t mask = pso2_button_mask(btn);
+                if (mask && ms > 0) {
+                    pso2_inject_press(mask, ms);
+                    LOG_INFO("[PSO2I] {} {} {}ms", cmd, btn, ms);
+                }
+            } else if (cmd == "shot") {
+                if (frame_dir.empty())
+                    LOG_INFO("[PSO2I] shot needs PSO2_FRAME_DIR");
+                else
+                    pso2_save_frame(*emuenv, frame_dir / (arg.empty() ? "shot" : arg) += ".png");
+            } else if (cmd == "text") {
+                pso2_ime_text(*emuenv, arg);
+            } else if (!cmd.empty()) {
+                LOG_INFO("[PSO2I] unknown command '{}'", cmd);
+            }
+        }
+        if (every > 0 && !frame_dir.empty() && std::chrono::steady_clock::now() - last_frame >= std::chrono::duration<double>(every)) {
+            last_frame = std::chrono::steady_clock::now();
+            if (!emuenv->io.title_id.empty())
+                pso2_save_frame(*emuenv, frame_dir / fmt::format("frame_{:05d}.png", frame_no++));
+        }
+        if (n <= 0)
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+}
+
+static void pso2_input_start(EmuEnvState &emuenv) {
+    static bool started = false;
+    if (started || !(getenv("PSO2_INPUT") || getenv("PSO2_FRAME_DIR")))
+        return;
+    started = true;
+    std::thread(pso2_input_loop, &emuenv).detach();
+}
+
 ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv) {
     return load_app(main_module_id, emuenv, AppLaunchRequest{
                                                 .app_path = emuenv.io.app_path,
@@ -620,6 +767,7 @@ ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv) {
 }
 
 ExitCode load_app(int32_t &main_module_id, EmuEnvState &emuenv, const AppLaunchRequest &launch_request) {
+    pso2_input_start(emuenv);
     if (load_app_impl(main_module_id, emuenv, launch_request) != Success) {
         std::string message = fmt::format(fmt::runtime(lang::get(lang::str::load_app_failed_msg)), emuenv.vita_fs_path / "ux0/app" / emuenv.io.app_path / emuenv.self_path);
         LOG_ERROR(message);

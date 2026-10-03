@@ -26,3 +26,6 @@ std::array<ControllerBinding, 15> get_controller_bindings_ext(EmuEnvState &emuen
 SceCtrlExternalInputMode get_type_of_controller(CtrlState &state, int port);
 int ctrl_get(const SceUID thread_id, EmuEnvState &emuenv, int port, SceCtrlData2 *pData, SceUInt32 count, bool negative, bool is_peek, bool is_v2, bool from_ext);
 void refresh_controllers(CtrlState &state, EmuEnvState &emuenv);
+
+// pso2_vita_offline (T14): hold the buttons in `mask` (SCE_CTRL_*) on port 1 for `ms` milliseconds.
+void pso2_inject_press(uint32_t mask, int ms);

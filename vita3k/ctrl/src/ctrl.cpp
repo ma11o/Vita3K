@@ -25,6 +25,34 @@
 #include <kernel/state.h>
 #include <util/log.h>
 
+#include <chrono>
+#include <mutex>
+#include <vector>
+
+// pso2_vita_offline (T14): buttons injected from outside (PSO2_INPUT), OR-ed into port 1 so automation needs no host key events.
+static std::mutex g_inject_mutex;
+static std::vector<std::pair<uint32_t, std::chrono::steady_clock::time_point>> g_inject_held;
+
+void pso2_inject_press(uint32_t mask, int ms) {
+    std::lock_guard<std::mutex> lock(g_inject_mutex);
+    g_inject_held.emplace_back(mask, std::chrono::steady_clock::now() + std::chrono::milliseconds(ms));
+}
+
+static uint32_t pso2_inject_buttons() {
+    std::lock_guard<std::mutex> lock(g_inject_mutex);
+    const auto now = std::chrono::steady_clock::now();
+    uint32_t mask = 0;
+    for (auto it = g_inject_held.begin(); it != g_inject_held.end();) {
+        if (it->second <= now) {
+            it = g_inject_held.erase(it);
+        } else {
+            mask |= it->first;
+            ++it;
+        }
+    }
+    return mask;
+}
+
 static int reserve_port(CtrlState &state) {
     for (int i = 0; i < SCE_CTRL_MAX_WIRELESS_NUM; i++) {
         if (state.free_ports[i]) {
@@ -276,6 +304,10 @@ static void retrieve_ctrl_data(EmuEnvState &emuenv, int port, bool is_v2, bool n
         for (const auto &[_, controller] : state.controllers) {
             apply_controller(emuenv, &buttons, axes.data(), controller.controller.get(), is_v2);
         }
+    }
+
+    if (port == 1) {
+        buttons |= pso2_inject_buttons();
     }
 
     reset_axes();
