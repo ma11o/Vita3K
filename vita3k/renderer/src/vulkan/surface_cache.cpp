@@ -1406,9 +1406,12 @@ void VKSurfaceCache::perform_post_surface_sync_inner(ColorSurfaceCacheInfo *surf
             assert(surface->sws_context != NULL);
         }
 
-        int src_stride = pixel_stride * 4;
-        int dst_stride = pixel_stride * 3;
-        sws_scale(surface->sws_context, reinterpret_cast<const uint8_t *const *>(&surface->copy_buffer->mapped_data), &src_stride, 0, surface->original_height, &pixels, &dst_stride);
+        // sws_scale reads 4 planes and strides
+        const uint8_t *src_slices[4] = { static_cast<const uint8_t *>(surface->copy_buffer->mapped_data), nullptr, nullptr, nullptr };
+        uint8_t *dst_slices[4] = { pixels, nullptr, nullptr, nullptr };
+        const int src_strides[4] = { static_cast<int>(pixel_stride * 4), 0, 0, 0 };
+        const int dst_strides[4] = { static_cast<int>(pixel_stride * 3), 0, 0, 0 };
+        sws_scale(surface->sws_context, src_slices, src_strides, 0, surface->original_height, dst_slices, dst_strides);
         return;
     }
 
