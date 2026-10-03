@@ -114,7 +114,12 @@ COMMAND(new_frame) {
 // Client side function
 void finish(State &state, Context *context) {
     // Add NOP then wait for it
-    renderer::send_single_command(state, context, renderer::CommandOpcode::Nop, true, 1);
+    // The NOP is allocated on the host and submitted without a context: commands of an immediate context
+    // live in a ring that must be freed in allocation order, and this NOP is processed before the commands
+    // the context has recorded but not submitted yet (state set outside a scene, or a finish within a scene).
+    // Command lists are processed in submission order, so this still waits for everything submitted so far.
+    (void)context;
+    renderer::send_single_command(state, nullptr, renderer::CommandOpcode::Nop, true, 1);
 
     // unblock game threads if shutting down
     if (state.render_abort.load(std::memory_order_relaxed))
