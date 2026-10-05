@@ -886,6 +886,26 @@ vk::Pipeline PipelineCache::compile_pipeline(SceGxmPrimitiveType type, vk::Rende
         color_blending.setAttachments(blending);
     }
 
+    static const bool diag_log = std::getenv("PSO2_DRAW_LOG") != nullptr;
+    if (diag_log) {
+        const vk::PipelineColorBlendAttachmentState &b = fragment_program.blending;
+        std::string attrs;
+        for (const SceGxmVertexAttribute &a : vertex_program_gxm.attributes) {
+            const bool known = vertex_program.attribute_infos.contains(a.regIndex);
+            attrs += fmt::format(" r{}:s{}+{}:f{}x{}{}", a.regIndex, a.streamIndex, a.offset, (int)a.format, (int)a.componentCount,
+                known ? (vertex_program.attribute_infos.at(a.regIndex).regformat ? "R" : "") : "?");
+        }
+        std::string strides;
+        for (unsigned int s = 0; s < SCE_GXM_MAX_VERTEX_STREAMS; s++)
+            if (vertex_program_gxm.streams[s].stride)
+                strides += fmt::format(" s{}={}", s, vertex_program_gxm.streams[s].stride);
+        LOG_INFO("[DRAW] pipe v={} f={} blend={} c={}/{}/{} a={}/{}/{} mask={:x} fetch={} native={} gamma={} fdis={} noout={} vtex={} ftex={} attrs:{} strides:{}",
+            hex_string(vertex_program.hash).substr(0, 16), hex_string(fragment_program.hash).substr(0, 16), (int)b.blendEnable,
+            (int)b.srcColorBlendFactor, (int)b.dstColorBlendFactor, (int)b.colorBlendOp, (int)b.srcAlphaBlendFactor, (int)b.dstAlphaBlendFactor, (int)b.alphaBlendOp,
+            (uint32_t)b.colorWriteMask, (int)gxm_fragment_shader->is_frag_color_used(), (int)gxm_fragment_shader->is_native_color(), (int)record.is_gamma_corrected,
+            (int)is_fragment_disabled, (int)frag_has_no_output, vertex_program.texture_count, fragment_program.texture_count, attrs, strides);
+    }
+
     vk::PipelineLayout pipeline_layout = pipeline_layouts[vertex_program.texture_count][fragment_program.texture_count];
 
     // all of these can be changed at any time using the vita graphics api (like opengl)

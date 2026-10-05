@@ -84,6 +84,8 @@ void VKTextureCache::cleanup() {
     is_texture_transfer_ready = false;
 }
 
+uint32_t diag_frag_texture_addr[SCE_GXM_MAX_TEXTURE_UNITS] = {};
+
 void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTexture texture, const Config &config) {
     // why are we doing this here?
     // well textures are synced right before the draw
@@ -93,6 +95,8 @@ void sync_texture(VKContext &context, MemState &mem, std::size_t index, SceGxmTe
     context.check_for_macroblock_change(false);
 
     bool is_vertex = index >= SCE_GXM_MAX_TEXTURE_UNITS;
+    if (!is_vertex)
+        diag_frag_texture_addr[index] = texture.data_addr << 2;
 
     const SceGxmTextureFormat format = gxm::get_format(texture);
     const SceGxmTextureBaseFormat base_format = gxm::get_base_format(format);

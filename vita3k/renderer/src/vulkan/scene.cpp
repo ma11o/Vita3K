@@ -25,7 +25,12 @@
 
 #include <util/log.h>
 
+#include <chrono>
+#include <set>
+
 namespace renderer::vulkan {
+
+extern uint32_t diag_frag_texture_addr[SCE_GXM_MAX_TEXTURE_UNITS];
 
 void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *program, const bool vertex_shader, const int block_num, const int size, Ptr<uint8_t> data) {
     auto offset = program->uniform_buffer_data_offsets.at(block_num);
@@ -34,6 +39,21 @@ void set_uniform_buffer(VKContext &context, MemState &mem, const ShaderProgram *
     }
 
     const uint32_t data_size_upload = std::min<uint32_t>(size, program->uniform_buffer_sizes.at(block_num) * 4);
+    if (!vertex_shader) {
+        // PSO2_UBO_LOG="<fragment hash prefix>,..." : log the first uniform uploads of these programs as floats (diagnostics)
+        static const std::string diag_ubo = std::getenv("PSO2_UBO_LOG") ? std::getenv("PSO2_UBO_LOG") : "";
+        static std::map<std::string, int> diag_count;
+        if (!diag_ubo.empty()) {
+            const std::string h = hex_string(program->hash).substr(0, 16);
+            if (diag_ubo.find(h) != std::string::npos && diag_count[h]++ < 40) {
+                const float *f = reinterpret_cast<const float *>(data.get(mem));
+                std::string s;
+                for (uint32_t i = 0; i < std::min<uint32_t>(data_size_upload / 4, 24); i++)
+                    s += fmt::format(" {:.4g}", f[i]);
+                LOG_INFO("[DRAW] ubo f={} blk={} size={}:{}", h, block_num, data_size_upload, s);
+            }
+        }
+    }
     if (context.state.features.enable_memory_mapping) {
         if (context.state.mapping_method == MappingMethod::DoubleBuffer) {
             // we must always cover everything as some small part of the buffer may get changed only
@@ -347,6 +367,47 @@ void draw(VKContext &context, SceGxmPrimitiveType type, SceGxmIndexFormat format
         // the mask is not emulated: the update would write writing_mask as a color over the surface, and later draws ignore the mask anyway
         LOG_WARN_ONCE("Mask bit is disabled, skipping mask update draws");
         return;
+    }
+    {
+        // PSO2_SKIP_FRAG="<fragment hash prefix>,..." : drop the draws of these fragment programs (diagnostics)
+        static const std::vector<std::string> diag_skip = [] {
+            std::vector<std::string> v;
+            if (const char *e = std::getenv("PSO2_SKIP_FRAG")) {
+                std::string s = e;
+                for (size_t p = 0; p <= s.size();) {
+                    size_t q = s.find(',', p);
+                    if (q == std::string::npos)
+                        q = s.size();
+                    if (q > p)
+                        v.push_back(s.substr(p, q - p));
+                    p = q + 1;
+                }
+            }
+            return v;
+        }();
+        // PSO2_SKIP_FRAG_AFTER=<seconds> : only from this many seconds after the first draw (menus use the same programs)
+        static const auto diag_start = std::chrono::steady_clock::now();
+        static const double diag_after = std::getenv("PSO2_SKIP_FRAG_AFTER") ? std::atof(std::getenv("PSO2_SKIP_FRAG_AFTER")) : 0.0;
+        static const bool diag_log = std::getenv("PSO2_DRAW_LOG") != nullptr;
+        if (diag_log) {
+            // once per (fragment program, color surface): which target the program draws into
+            static std::set<std::string> seen;
+            const SceGxmColorSurface &cs = context.record.color_surface;
+            const std::string key = fmt::format("f={} fmt={:x} data={:x} {}x{} stride={} outreg={} gamma={} down={}",
+                hex_string(gxm_fragment_program.renderer_data->hash).substr(0, 16), (uint32_t)cs.colorFormat, cs.data.address(),
+                cs.width, cs.height, cs.strideInPixels, cs.outputRegisterSize, (int)cs.gamma, (int)cs.downscale);
+            std::string tex;
+            for (int i = 0; i < 4; i++)
+                tex += fmt::format(" t{}={:x}@{:x}", i, (uint32_t)context.shader_hints.fragment_textures[i], diag_frag_texture_addr[i]);
+            if (seen.insert(key + tex).second)
+                LOG_INFO("[DRAW] draw {}{}", key, tex);
+        }
+        if (!diag_skip.empty() &&std::chrono::duration<double>(std::chrono::steady_clock::now() - diag_start).count() >= diag_after) {
+            const std::string h = hex_string(gxm_fragment_program.renderer_data->hash);
+            for (const std::string &p : diag_skip)
+                if (h.compare(0, p.size(), p) == 0)
+                    return;
+        }
     }
     if (context.state.features.direct_fragcolor && fragment_program_gxp.is_frag_color_used()) {
         // the fragment shader is using programmable blending with a subpass input
