@@ -36,6 +36,14 @@ extern "C" {
 
 namespace renderer {
 
+// without memory mapping, the vulkan surfaces do not see what a transfer writes to guest memory: tell the surface cache
+static void mark_transfer_dest(State &renderer, const SceGxmTransferImage &dst) {
+    if (renderer.current_backend != Backend::Vulkan || renderer.features.enable_memory_mapping)
+        return;
+    const uint32_t size = (dst.y + dst.height) * static_cast<uint32_t>(dst.stride);
+    dynamic_cast<vulkan::VKState &>(renderer).surface_cache.mark_guest_written(dst.address.address(), size);
+}
+
 template <typename T, SceGxmTransferColorKeyMode mode, SceGxmTransferType src_type, SceGxmTransferType dst_type>
 static void perform_transfer_copy_impl(MemState &mem, const SceGxmTransferImage &src, const SceGxmTransferImage &dst, uint32_t key_value, uint32_t key_mask) {
     T *__restrict__ src_ptr = src.address.cast<T>().get(mem);
@@ -199,7 +207,9 @@ COMMAND(handle_transfer_copy) {
             return;
     }
 
+    const SceGxmTransferImage copy_dst = images[1];
     copy_operation();
+    mark_transfer_dest(renderer, copy_dst);
 }
 
 COMMAND(handle_transfer_downscale) {
@@ -306,7 +316,10 @@ COMMAND(handle_transfer_downscale) {
             return;
     }
 
+    SceGxmTransferImage downscale_dst = *dst;
+    downscale_dst.x = downscale_dst.y = 0; // the address was already adjusted
     downscale_operation();
+    mark_transfer_dest(renderer, downscale_dst);
 }
 
 COMMAND(handle_transfer_fill) {
@@ -331,6 +344,7 @@ COMMAND(handle_transfer_fill) {
     }
 
     // TODO: handle case where dest is a cached surface
+    mark_transfer_dest(renderer, *dest);
 
     delete dest;
 }

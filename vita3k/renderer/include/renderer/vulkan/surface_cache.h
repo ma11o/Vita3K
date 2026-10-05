@@ -98,6 +98,9 @@ struct ColorSurfaceCacheInfo : public SurfaceCacheInfo {
     // only used for 3-component rgb textures which can't be copied directly
     std::unique_ptr<vkutil::Buffer> copy_buffer;
 
+    // staging buffer used to upload guest memory written by the CPU (without memory mapping)
+    std::unique_ptr<vkutil::Buffer> upload_buffer;
+
     // pointer shared with the memory trap indicating if this surface sync is needed
     std::shared_ptr<bool> need_surface_sync;
 
@@ -189,6 +192,7 @@ private:
     void destroy_surface(ColorSurfaceCacheInfo &info);
     void destroy_surface(DepthStencilSurfaceCacheInfo &info);
     void perform_post_surface_sync_inner(ColorSurfaceCacheInfo *surface, uint8_t *pixels, uint32_t pixel_stride, uint32_t nb_pixels);
+    void upload_dirty_surface(MemState &mem, ColorSurfaceCacheInfo &info);
 
 public:
     // when creating a mutable image, can we pass as an argument
@@ -218,6 +222,8 @@ public:
     // if this call is used for a copy or similar operation set the changed address to the destination
     // so that subsequent calls to check_for_surface with the target destination also get delayed
     bool check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address);
+    // a transfer done on the CPU wrote guest memory in this range: the color surfaces there must reload it before being rendered to
+    void mark_guest_written(Address address, uint32_t size);
 
     // If non-null, the return value must be sent as a PostSurfaceSyncRequest
     ColorSurfaceCacheInfo *perform_surface_sync();

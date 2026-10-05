@@ -282,8 +282,11 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
         } else {
             color_surface_queue.set_as_mru(&info);
 
-            if (info.data && *info.dirty)
+            if (info.data && *info.dirty) {
+                // the guest (CPU or a transfer done on the CPU) wrote to this surface since it was last rendered to
+                upload_dirty_surface(mem, info);
                 protect_surface(mem, info);
+            }
             *info.dirty = false;
 
             last_written_surface = &info;
@@ -1542,6 +1545,64 @@ std::vector<uint32_t> VKSurfaceCache::dump_frame(Ptr<const void> address, uint32
     memcpy(frame.data(), temp_buff.mapped_data, frame.size() * 4);
 
     return frame;
+}
+
+void VKSurfaceCache::mark_guest_written(Address address, uint32_t size) {
+    for (auto &[surface_address, info] : color_address_lookup) {
+        if (surface_address < address + size && surface_address + info->total_bytes > address)
+            *info->dirty = true;
+    }
+}
+
+void VKSurfaceCache::upload_dirty_surface(MemState &mem, ColorSurfaceCacheInfo &info) {
+    // Without memory mapping, the image is the only copy the GPU renders to: writes from the CPU side
+    // (for example sceGxmTransferDownscale into a render target) never reach it, and draws keep accumulating
+    // on top of stale content. Copy guest memory into the image before it is rendered to again.
+    static const bool disabled = std::getenv("PSO2_NO_DIRTY_UPLOAD") != nullptr;
+    if (disabled || state.features.enable_memory_mapping || state.res_multiplier != 1.0f)
+        return;
+    if (info.tiling != SurfaceTiling::Linear || format_need_additional_memory(info.format) || vk::componentBits(info.texture.format, 0) != 8)
+        return;
+    // swizzle_text_T is its own inverse except for ARGB
+    if (info.swizzle.r == vk::ComponentSwizzle::eG)
+        return;
+
+    VKContext *context = reinterpret_cast<VKContext *>(state.context);
+    if (!context->prerender_cmd)
+        return;
+
+    const uint32_t pixel_stride = (info.stride_bytes * 8) / gxm::bits_per_pixel(info.format);
+    const uint32_t size = info.stride_bytes * info.original_height;
+    if (!info.upload_buffer)
+        info.upload_buffer = std::make_unique<vkutil::Buffer>();
+    vkutil::Buffer &buffer = *info.upload_buffer;
+    if (!buffer.buffer) {
+        buffer.size = size;
+        buffer.init_buffer(vk::BufferUsageFlagBits::eTransferSrc, vkutil::vma_mapped_alloc);
+    }
+
+    // the previous upload of this surface has completed: the scene that used it waited for its fence
+    std::memcpy(buffer.mapped_data, info.data.cast<uint8_t>().get(mem), size);
+    if (info.swizzle.r != vk::ComponentSwizzle::eR)
+        swizzle_text_T<uint8_t>(static_cast<uint8_t *>(buffer.mapped_data), pixel_stride * info.original_height, &info);
+
+    vk::CommandBuffer cmd_buffer = context->prerender_cmd;
+    info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst);
+    vk::BufferImageCopy copy{
+        .bufferOffset = 0,
+        .bufferRowLength = pixel_stride,
+        .bufferImageHeight = info.original_height,
+        .imageSubresource = vkutil::color_subresource_layer,
+        .imageOffset = { 0, 0, 0 },
+        .imageExtent = { info.original_width, info.original_height, 1 }
+    };
+    cmd_buffer.copyBufferToImage(buffer.buffer, info.texture.image, vk::ImageLayout::eTransferDstOptimal, copy);
+    info.texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+
+    static const bool diag_log = std::getenv("PSO2_DRAW_LOG") != nullptr;
+    static uint32_t diag_uploads = 0;
+    if (diag_log && diag_uploads++ < 50)
+        LOG_INFO("[DRAW] upload dirty surface 0x{:08X} {}x{}", info.data.address(), info.original_width, info.original_height);
 }
 
 } // namespace renderer::vulkan
