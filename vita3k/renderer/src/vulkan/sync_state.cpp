@@ -220,7 +220,15 @@ void sync_visibility_buffer(VKContext &context, Ptr<uint32_t> buffer, uint32_t s
         context.visibility_buffers[buffer.address()] = { buffer.address(), nullptr, 0, static_cast<uint32_t>(stride / sizeof(uint32_t)), query_pool };
         ite = context.visibility_buffers.find(buffer.address());
 
-        std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(buffer.cast<void>());
+        if (context.state.features.enable_memory_mapping) {
+            std::tie(ite->second.gpu_buffer, ite->second.buffer_offset) = context.state.get_matching_mapping(buffer.cast<void>());
+        } else {
+            // no guest memory mapped on the GPU (macOS): copy the results to a host visible buffer
+            ite->second.copy_buffer = std::make_unique<vkutil::Buffer>(ite->second.size * sizeof(uint32_t));
+            ite->second.copy_buffer->init_buffer(vk::BufferUsageFlagBits::eTransferDst, vkutil::vma_mapped_alloc);
+            ite->second.gpu_buffer = ite->second.copy_buffer->buffer;
+            ite->second.buffer_offset = 0;
+        }
         // the + 1 is to make computing the ranges easier in context.cpp
         ite->second.queries_used.resize(ite->second.size + 1, false);
     }

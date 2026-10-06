@@ -456,6 +456,8 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             render_cmd.copyQueryPoolResults(current_visibility_buffer->query_pool, range.offset, range.size,
                 current_visibility_buffer->gpu_buffer, current_visibility_buffer->buffer_offset + range.offset * sizeof(uint32_t),
                 sizeof(uint32_t), vk::QueryResultFlagBits::eWait);
+            if (!state.features.enable_memory_mapping)
+                pending_visibility_writes.emplace_back(current_visibility_buffer, range.offset, range.size);
         }
         visibility_max_used_idx = -1;
         current_visibility_buffer->queries_used.assign(current_visibility_buffer->size, false);
@@ -497,12 +499,17 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     cmdbuffers_to_submit.clear();
     state.frame().rendered_fences.push_back(fence);
 
-    if (!state.features.enable_memory_mapping && surface_info) {
+    if (!state.features.enable_memory_mapping && (surface_info || !pending_visibility_writes.empty())) {
         // the notifications are signaled right after this returns, so the guest memory must be up to date by then
         auto result = state.device.waitForFences(fence, vk::True, std::numeric_limits<uint64_t>::max());
         if (result != vk::Result::eSuccess)
             LOG_ERROR("Could not wait for fences.");
-        state.surface_cache.perform_post_surface_sync(mem, surface_info);
+        if (surface_info)
+            state.surface_cache.perform_post_surface_sync(mem, surface_info);
+        // visibility results (the game uses them to decide what to draw in the next frames)
+        for (auto &[vb, offset, size] : pending_visibility_writes)
+            std::memcpy(Ptr<uint32_t>(vb->address).get(mem) + offset, static_cast<uint32_t *>(vb->copy_buffer->mapped_data) + offset, size * sizeof(uint32_t));
+        pending_visibility_writes.clear();
     }
 
     if (state.features.enable_memory_mapping) {

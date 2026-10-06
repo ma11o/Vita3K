@@ -175,6 +175,8 @@ struct VisibilityBuffer {
     uint32_t size;
     vk::QueryPool query_pool;
     std::vector<bool> queries_used; // the queries that were used in the current scene
+    // without memory mapping: the query results are copied here, then written to guest memory after the scene fence
+    std::unique_ptr<vkutil::Buffer> copy_buffer;
 };
 
 struct FenceWaitRequest {
@@ -269,6 +271,8 @@ struct VKContext : public renderer::Context {
     bool is_in_query = false;
     int current_query_idx = -1;
     bool is_query_op_increment = false;
+    // without memory mapping: query results recorded but not yet written to guest memory (visibility buffer, first entry, count)
+    std::vector<std::tuple<VisibilityBuffer *, uint32_t, uint32_t>> pending_visibility_writes;
 
     // descriptor pool for dynamic uniforms (allocated once for the whole game)
     vk::DescriptorPool global_descriptor_pool;

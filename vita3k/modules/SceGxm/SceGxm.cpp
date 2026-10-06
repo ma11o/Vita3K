@@ -1625,7 +1625,7 @@ static void gxmContextStateRestore(renderer::State &state, SceGxmContext *contex
     renderer::set_stencil_ref(state, context->renderer.get(), true, context->state.front_stencil.ref);
     renderer::set_stencil_ref(state, context->renderer.get(), false, context->state.back_stencil.ref);
 
-    if (state.features.enable_memory_mapping) {
+    if (state.features.enable_memory_mapping || state.current_backend == renderer::Backend::Vulkan) {
         context->state.visibility_enable = false;
         context->state.visibility_index = 0;
         context->state.visibility_is_increment = true;
@@ -4128,7 +4128,7 @@ EXPORT(void, sceGxmSetFrontStencilRef, SceGxmContext *context, uint8_t sref) {
 EXPORT(void, sceGxmSetFrontVisibilityTestEnable, SceGxmContext *context, SceGxmVisibilityTestMode enable) {
     TRACY_FUNC(sceGxmSetFrontVisibilityTestEnable, context, enable);
 
-    if (!emuenv.renderer->features.enable_memory_mapping) {
+    if (!emuenv.renderer->features.enable_memory_mapping && emuenv.renderer->current_backend != renderer::Backend::Vulkan) {
         UNIMPLEMENTED();
         return;
     }
@@ -4140,7 +4140,7 @@ EXPORT(void, sceGxmSetFrontVisibilityTestEnable, SceGxmContext *context, SceGxmV
 EXPORT(void, sceGxmSetFrontVisibilityTestIndex, SceGxmContext *context, uint32_t index) {
     TRACY_FUNC(sceGxmSetFrontVisibilityTestIndex, context, index);
 
-    if (!emuenv.renderer->features.enable_memory_mapping) {
+    if (!emuenv.renderer->features.enable_memory_mapping && emuenv.renderer->current_backend != renderer::Backend::Vulkan) {
         UNIMPLEMENTED();
         return;
     }
@@ -4152,7 +4152,7 @@ EXPORT(void, sceGxmSetFrontVisibilityTestIndex, SceGxmContext *context, uint32_t
 EXPORT(void, sceGxmSetFrontVisibilityTestOp, SceGxmContext *context, SceGxmVisibilityTestOp op) {
     TRACY_FUNC(sceGxmSetFrontVisibilityTestOp, context, op);
 
-    if (!emuenv.renderer->features.enable_memory_mapping) {
+    if (!emuenv.renderer->features.enable_memory_mapping && emuenv.renderer->current_backend != renderer::Backend::Vulkan) {
         UNIMPLEMENTED();
         return;
     }
@@ -4478,11 +4478,12 @@ EXPORT(int, sceGxmSetVisibilityBuffer, SceGxmContext *immediateContext, Ptr<void
     if (bufferBase.address() & (SCE_GXM_VISIBILITY_ALIGNMENT - 1))
         return RET_ERROR(SCE_GXM_ERROR_INVALID_ALIGNMENT);
 
-    if (emuenv.renderer->features.enable_memory_mapping) {
-        renderer::set_visibility_buffer(*emuenv.renderer, immediateContext->renderer.get(), bufferBase.cast<uint32_t>(), stridePerCore);
-    } else {
+    if (!emuenv.renderer->features.enable_memory_mapping && emuenv.renderer->current_backend != renderer::Backend::Vulkan) {
         STUBBED("Set all visible");
         memset(bufferBase.get(emuenv.mem), 0xFF, SCE_GXM_GPU_CORE_COUNT * stridePerCore);
+    } else {
+        // Vulkan without memory mapping copies the query results to guest memory after each scene
+        renderer::set_visibility_buffer(*emuenv.renderer, immediateContext->renderer.get(), bufferBase.cast<uint32_t>(), stridePerCore);
     }
 
     return 0;
