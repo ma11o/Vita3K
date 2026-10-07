@@ -389,9 +389,12 @@ SurfaceRetrieveResult VKSurfaceCache::retrieve_color_surface_for_framebuffer(Mem
         protect_surface(mem, info_added);
     }
 
-    if (!state.features.enable_memory_mapping) {
-        // without memory mapping, sync every linear surface: waiting for the first guest access (the memory trap) is too late,
-        // the guest would read the content of the scene before
+    // sync every linear surface: waiting for the first guest access (the memory trap) is too late, the guest would read the
+    // content of the scene before (PSO2 composes each character texture in a surface and reads it once right after the scene,
+    // with the trap the first one stayed black). Without memory mapping nothing else writes rendered data back.
+    // PSO2_TRAP_SURFACE_SYNC=1 restores the trap with memory mapping.
+    static const bool trap_surface_sync = pso2_env("PSO2_TRAP_SURFACE_SYNC") != nullptr;
+    if (!state.features.enable_memory_mapping || !trap_surface_sync) {
         *info_added.need_surface_sync = color->surfaceType == SCE_GXM_COLOR_SURFACE_LINEAR && format_support_surface_sync(info_added.format);
     }
 
@@ -1244,6 +1247,23 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
     vk::Image image_to_copy = last_written_surface->texture.image;
     vk::ImageLayout image_layout = vk::ImageLayout::eGeneral;
 
+    // the draws of the render pass that just ended must be visible to the copy below: without this barrier, Mali (tiled GPU)
+    // copied the content from before the scene, so every guest read got the previous render
+    // (PSO2 composes the character textures in a surface and reads each one once: black characters)
+    {
+        const vk::ImageMemoryBarrier barrier{
+            .srcAccessMask = vk::AccessFlagBits::eColorAttachmentWrite,
+            .dstAccessMask = vk::AccessFlagBits::eTransferRead,
+            .oldLayout = image_layout,
+            .newLayout = image_layout,
+            .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+            .image = image_to_copy,
+            .subresourceRange = vkutil::color_subresource_range
+        };
+        cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eColorAttachmentOutput, vk::PipelineStageFlagBits::eTransfer, {}, {}, {}, barrier);
+    }
+
     // this works for surface swizzles
     bool is_swizzle_identity = last_written_surface->swizzle.r == vk::ComponentSwizzle::eR;
     if (!is_swizzle_identity && !format_support_swizzle(last_written_surface->format)) {
@@ -1320,6 +1340,13 @@ ColorSurfaceCacheInfo *VKSurfaceCache::perform_surface_sync() {
         .imageExtent = { last_written_surface->original_width, last_written_surface->original_height, 1 }
     };
     cmd_buffer.copyImageToBuffer(image_to_copy, image_layout, buffer, copy);
+
+    // the CPU reads the buffer once the fence is signaled
+    const vk::MemoryBarrier host_barrier{
+        .srcAccessMask = vk::AccessFlagBits::eTransferWrite,
+        .dstAccessMask = vk::AccessFlagBits::eHostRead
+    };
+    cmd_buffer.pipelineBarrier(vk::PipelineStageFlagBits::eTransfer, vk::PipelineStageFlagBits::eHost, {}, host_barrier, {}, {});
 
     ColorSurfaceCacheInfo *return_value = last_written_surface;
     last_written_surface = nullptr;
