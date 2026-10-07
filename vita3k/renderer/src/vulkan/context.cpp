@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <util/pso2_env.h>
 #include <renderer/vulkan/types.h>
 
 #include <renderer/vulkan/functions.h>
@@ -456,7 +457,9 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
             render_cmd.copyQueryPoolResults(current_visibility_buffer->query_pool, range.offset, range.size,
                 current_visibility_buffer->gpu_buffer, current_visibility_buffer->buffer_offset + range.offset * sizeof(uint32_t),
                 sizeof(uint32_t), vk::QueryResultFlagBits::eWait);
-            if (!state.features.enable_memory_mapping)
+            // PSO2_NO_VISIBILITY_WRITEBACK leaves the results unwritten (the CPU would wait for the GPU after the scene)
+            static const bool no_visibility_writeback = pso2_env("PSO2_NO_VISIBILITY_WRITEBACK") != nullptr;
+            if (!state.features.enable_memory_mapping && !no_visibility_writeback)
                 pending_visibility_writes.emplace_back(current_visibility_buffer, range.offset, range.size);
         }
         visibility_max_used_idx = -1;
@@ -466,7 +469,9 @@ void VKContext::stop_recording(const SceGxmNotification &notif1, const SceGxmNot
     ColorSurfaceCacheInfo *surface_info = nullptr;
     // without memory mapping (macOS), always sync: nothing else ever writes rendered data to guest memory,
     // and games reading it on the CPU are broken (disable_surface_sync is on by default)
-    if ((!state.features.enable_memory_mapping || !state.disable_surface_sync) && submit)
+    // PSO2_NO_SURFACE_WRITEBACK skips it (the CPU waits for the GPU after each such scene; slow on mobile GPUs)
+    static const bool no_surface_writeback = pso2_env("PSO2_NO_SURFACE_WRITEBACK") != nullptr;
+    if (((!state.features.enable_memory_mapping && !no_surface_writeback) || !state.disable_surface_sync) && submit)
         surface_info = state.surface_cache.perform_surface_sync();
 
     prerender_cmd.end();

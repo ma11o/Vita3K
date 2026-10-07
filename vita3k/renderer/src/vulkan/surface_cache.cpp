@@ -15,6 +15,7 @@
 // with this program; if not, write to the Free Software Foundation, Inc.,
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
+#include <util/pso2_env.h>
 #include <renderer/vulkan/surface_cache.h>
 
 #include <set>
@@ -1558,7 +1559,7 @@ void VKSurfaceCache::upload_dirty_surface(MemState &mem, ColorSurfaceCacheInfo &
     // Without memory mapping, the image is the only copy the GPU renders to: writes from the CPU side
     // (for example sceGxmTransferDownscale into a render target) never reach it, and draws keep accumulating
     // on top of stale content. Copy guest memory into the image before it is rendered to again.
-    static const bool disabled = std::getenv("PSO2_NO_DIRTY_UPLOAD") != nullptr;
+    static const bool disabled = pso2_env("PSO2_NO_DIRTY_UPLOAD") != nullptr;
     if (disabled || state.features.enable_memory_mapping || state.res_multiplier != 1.0f)
         return;
     if (info.tiling != SurfaceTiling::Linear || format_need_additional_memory(info.format) || vk::componentBits(info.texture.format, 0) != 8)

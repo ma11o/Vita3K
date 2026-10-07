@@ -31,6 +31,7 @@
 #include <util/fs.h>
 #include <util/log.h>
 #include <util/net_utils.h>
+#include <util/pso2_env.h>
 
 #include <SDL3/SDL_camera.h>
 #include <SDL3/SDL_gamepad.h>
@@ -326,6 +327,10 @@ bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) 
     emuenv.avg_fps = static_cast<uint32_t>(avg_fps) / perf_frames_size;
     emuenv.min_fps = static_cast<uint32_t>(*std::min_element(std::begin(emuenv.fps_values), std::end(emuenv.fps_values)));
     emuenv.max_fps = static_cast<uint32_t>(*std::max_element(std::begin(emuenv.fps_values), std::end(emuenv.fps_values)));
+
+    // PSO2_FPS_LOG: one line per second, for measuring without reading the overlay (Android: debug.pso2.fps_log)
+    if (pso2_env("PSO2_FPS_LOG"))
+        LOG_WARN("[pso2-fps] {} fps {} ms/frame", emuenv.fps, emuenv.ms_per_frame);
 
     if (!emuenv.renderer)
         return true;
