@@ -23,6 +23,7 @@
 #include <renderer/state.h>
 #include <renderer/types.h>
 #include <util/log.h>
+#include <util/pso2_env.h>
 #include <util/tracy.h>
 
 #include <renderer/vulkan/state.h>
@@ -235,6 +236,14 @@ COMMAND(handle_transfer_downscale) {
     const uint32_t pixel_bytes = gxm::get_bits_per_pixel(src->format) / 8;
     src->address = (src->address.cast<uint8_t>() + src->y * src->stride + src->x * pixel_bytes).cast<void>();
     dst->address = (dst->address.cast<uint8_t>() + dst->y * dst->stride + dst->x * pixel_bytes).cast<void>();
+
+    if (renderer.current_backend == Backend::Vulkan && !renderer.disable_surface_sync)
+        // the destination surface image gets the downscale before the next draws on it, the CPU one below still writes guest memory
+        if (!dynamic_cast<vulkan::VKState &>(renderer).surface_cache.queue_downscale(src->address.address(), src->width, src->height, dst->address.address(), dst->width, dst->height)) {
+            static uint32_t t79_misses = 0;
+            if (pso2_env("PSO2_DOWNSCALE_LOG") && t79_misses++ < 20)
+                LOG_WARN("[DOWNSCALE] not queued 0x{:08X} {}x{} -> 0x{:08X} {}x{}", src->address.address(), src->width, src->height, dst->address.address(), dst->width, dst->height);
+        }
 
     // only rgb formats are supported by the PS Vita for downscaling
     vulkan::CallbackRequestFunction downscale_operation = [&mem, src, dst]() {

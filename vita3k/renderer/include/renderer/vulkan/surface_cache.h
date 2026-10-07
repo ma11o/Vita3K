@@ -183,6 +183,17 @@ private:
     // use a vector instead of a set because expect it to be always quite small
     std::vector<Address> cpu_surfaces_changed;
 
+    // downscales between two color surfaces, done on the GPU at the start of the next scene (with memory mapping)
+    struct PendingDownscale {
+        Address src;
+        uint32_t src_width;
+        uint32_t src_height;
+        Address dst;
+        uint32_t dst_width;
+        uint32_t dst_height;
+    };
+    std::vector<PendingDownscale> pending_downscales;
+
     VKRenderTarget *target = nullptr;
     ColorSurfaceCacheInfo *last_written_surface = nullptr;
 
@@ -224,6 +235,11 @@ public:
     bool check_for_surface(MemState &mem, Address source_address, CallbackRequestFunction &callback, Address target_address);
     // a transfer done on the CPU wrote guest memory in this range: the color surfaces there must reload it before being rendered to
     void mark_guest_written(Address address, uint32_t size);
+    // with memory mapping, the CPU downscale reading a color surface waits for the surface to be synced, too late for the
+    // draws on the destination surface: also downscale between the surface images on the GPU (returns false if not both surfaces)
+    bool queue_downscale(Address src, uint32_t src_width, uint32_t src_height, Address dst, uint32_t dst_width, uint32_t dst_height);
+    // records the queued downscales (before the draws of the scene that is starting)
+    void flush_pending_downscales(vk::CommandBuffer cmd_buffer);
 
     // If non-null, the return value must be sent as a PostSurfaceSyncRequest
     ColorSurfaceCacheInfo *perform_surface_sync();

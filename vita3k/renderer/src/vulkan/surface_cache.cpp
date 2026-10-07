@@ -205,6 +205,7 @@ void VKSurfaceCache::cleanup() {
     depth_address_lookup.clear();
     stencil_address_lookup.clear();
     cpu_surfaces_changed.clear();
+    pending_downscales.clear();
     target = nullptr;
     last_written_surface = nullptr;
 }
@@ -1580,6 +1581,68 @@ void VKSurfaceCache::mark_guest_written(Address address, uint32_t size) {
         if (surface_address < address + size && surface_address + info->total_bytes > address)
             *info->dirty = true;
     }
+}
+
+// the linear color surface containing this address, and the pixel position of the address in it
+static ColorSurfaceCacheInfo *find_linear_surface(std::map<Address, ColorSurfaceCacheInfo *> &lookup, Address address, uint32_t &x, uint32_t &y) {
+    auto it = lookup.upper_bound(address);
+    if (it == lookup.begin())
+        return nullptr;
+    --it;
+    ColorSurfaceCacheInfo &info = *it->second;
+    if (address >= it->first + info.total_bytes || info.tiling != SurfaceTiling::Linear || info.stride_bytes == 0)
+        return nullptr;
+    const uint32_t offset = address - it->first;
+    const uint32_t pixel_bytes = gxm::bits_per_pixel(info.format) / 8;
+    y = offset / info.stride_bytes;
+    x = (offset % info.stride_bytes) / pixel_bytes;
+    return &info;
+}
+
+bool VKSurfaceCache::queue_downscale(Address src, uint32_t src_width, uint32_t src_height, Address dst, uint32_t dst_width, uint32_t dst_height) {
+    static const bool disabled = pso2_env("PSO2_NO_GPU_DOWNSCALE") != nullptr;
+    if (disabled || !state.features.enable_memory_mapping)
+        return false;
+    uint32_t x, y;
+    ColorSurfaceCacheInfo *src_info = find_linear_surface(color_address_lookup, src, x, y);
+    ColorSurfaceCacheInfo *dst_info = find_linear_surface(color_address_lookup, dst, x, y);
+    if (!src_info || !dst_info || src_info == dst_info || src_info->texture.format != dst_info->texture.format || format_need_additional_memory(src_info->format))
+        return false;
+    pending_downscales.push_back({ src, src_width, src_height, dst, dst_width, dst_height });
+    return true;
+}
+
+void VKSurfaceCache::flush_pending_downscales(vk::CommandBuffer cmd_buffer) {
+    static const bool diag_log = pso2_env("PSO2_DOWNSCALE_LOG") != nullptr;
+    static uint32_t diag_count = 0;
+    for (const PendingDownscale &op : pending_downscales) {
+        uint32_t sx, sy, dx, dy;
+        ColorSurfaceCacheInfo *src_info = find_linear_surface(color_address_lookup, op.src, sx, sy);
+        ColorSurfaceCacheInfo *dst_info = find_linear_surface(color_address_lookup, op.dst, dx, dy);
+        if (!src_info || !dst_info || src_info == dst_info || src_info->texture.format != dst_info->texture.format)
+            continue;
+
+        const float scale = state.res_multiplier;
+        const auto scaled = [scale](uint32_t v) { return static_cast<int32_t>(v * scale); };
+        vk::ImageBlit blit{
+            .srcSubresource = vkutil::color_subresource_layer,
+            .srcOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ scaled(sx), scaled(sy), 0 }, vk::Offset3D{ scaled(sx + op.src_width), scaled(sy + op.src_height), 1 } },
+            .dstSubresource = vkutil::color_subresource_layer,
+            .dstOffsets = std::array<vk::Offset3D, 2>{ vk::Offset3D{ scaled(dx), scaled(dy), 0 }, vk::Offset3D{ scaled(dx + op.dst_width), scaled(dy + op.dst_height), 1 } },
+        };
+        src_info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferSrc);
+        dst_info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::TransferDst);
+        // a 2:1 linear blit samples between 2x2 pixels: the average, like the Vita
+        cmd_buffer.blitImage(src_info->texture.image, vk::ImageLayout::eTransferSrcOptimal, dst_info->texture.image, vk::ImageLayout::eTransferDstOptimal, blit, vk::Filter::eLinear);
+        src_info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+        dst_info->texture.transition_to(cmd_buffer, vkutil::ImageLayout::ColorAttachmentReadWrite);
+
+        if (diag_log && diag_count++ < 50)
+            LOG_WARN("[DOWNSCALE] 0x{:08X} ({},{} {}x{}) img {}x{} orig {}x{} -> 0x{:08X} ({},{} {}x{}) img {}x{} orig {}x{} fmt {}", op.src, sx, sy, op.src_width, op.src_height,
+                src_info->width, src_info->height, src_info->original_width, src_info->original_height, op.dst, dx, dy, op.dst_width, op.dst_height,
+                dst_info->width, dst_info->height, dst_info->original_width, dst_info->original_height, vk::to_string(src_info->texture.format));
+    }
+    pending_downscales.clear();
 }
 
 void VKSurfaceCache::upload_dirty_surface(MemState &mem, ColorSurfaceCacheInfo &info) {

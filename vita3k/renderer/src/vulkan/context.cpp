@@ -273,6 +273,7 @@ void VKContext::start_recording(bool first_in_scene) {
     };
     render_cmd.begin(begin_info);
     prerender_cmd.begin(begin_info);
+    state.surface_cache.flush_pending_downscales(prerender_cmd);
 
     is_recording = true;
 
