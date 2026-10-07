@@ -32,6 +32,9 @@
 #include <util/log.h>
 #include <util/net_utils.h>
 #include <util/pso2_env.h>
+#include <mem/ptr.h>
+
+#include <fstream>
 
 #include <SDL3/SDL_camera.h>
 #include <SDL3/SDL_gamepad.h>
@@ -331,6 +334,16 @@ bool update_runtime_metrics(EmuEnvState &emuenv, LaunchRuntimeMetrics &metrics) 
     // PSO2_FPS_LOG: one line per second, for measuring without reading the overlay (Android: debug.pso2.fps_log)
     if (pso2_env("PSO2_FPS_LOG"))
         LOG_WARN("[pso2-fps] {} fps {} ms/frame", emuenv.fps, emuenv.ms_per_frame);
+
+    // PSO2_DUMP_MEM=<hex addr>,<hex size>: once a second, write that guest memory to <cache path>/pso2-dump-<addr>.bin
+    if (const char *dump = pso2_env("PSO2_DUMP_MEM")) {
+        uint32_t addr = 0, size = 0;
+        if (std::sscanf(dump, "%x,%x", &addr, &size) == 2 && addr && size) {
+            const fs::path out = emuenv.cache_path / fmt::format("pso2-dump-{:08x}.bin", addr);
+            std::ofstream f(out.string(), std::ios::binary | std::ios::trunc);
+            f.write(reinterpret_cast<const char *>(Ptr<uint8_t>(addr).get(emuenv.mem)), size);
+        }
+    }
 
     if (!emuenv.renderer)
         return true;
