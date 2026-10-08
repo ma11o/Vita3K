@@ -16,6 +16,7 @@
 // 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 
 #include <util/log.h>
+#include <util/pso2_env.h>
 
 #ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
@@ -139,6 +140,9 @@ ExitCode init(const Root &root_paths, bool use_stdout) {
 }
 
 void set_level(spdlog::level::level_enum log_level) {
+    // PSO2_LOG_LEVEL=<0..6> (Android: debug.pso2.log_level) overrides config.yml; "0" (trace) is not readable as a property, so use 1..6
+    if (const char *v = pso2_env("PSO2_LOG_LEVEL"); v && *v >= '1' && *v <= '6')
+        log_level = static_cast<spdlog::level::level_enum>(*v - '0');
     spdlog::set_level(log_level);
 }
 

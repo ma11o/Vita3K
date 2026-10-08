@@ -20,6 +20,7 @@
 #define __ANDROID_UNAVAILABLE_SYMBOLS_ARE_WEAK__
 #endif
 
+#include <util/pso2_env.h>
 #include <renderer/functions.h>
 #include <renderer/types.h>
 #include <renderer/vulkan/functions.h>
@@ -449,7 +450,8 @@ bool VKState::create(std::unique_ptr<renderer::State> &state, const Config &conf
 
         std::vector<const char *> instance_layers;
         if (has_validation_layer && !found_debug_extension.empty()) {
-            if (config.validation_layer) {
+            // PSO2_NO_VALIDATION (Android: debug.pso2.no_validation) turns the layer off without editing config.yml
+            if (config.validation_layer && !pso2_env("PSO2_NO_VALIDATION")) {
                 LOG_INFO("Enabling vulkan validation layers (has a performance impact but allows better error messages)");
                 instance_layers.push_back(validation_layer.c_str());
                 instance_extensions.push_back(found_debug_extension.data());
